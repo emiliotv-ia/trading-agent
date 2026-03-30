@@ -4,7 +4,7 @@ import time
 import random
 import threading
 from datetime import datetime
-from flask import Flask, jsonify, request, make_response
+from flask import Flask, jsonify, request, make_response, send_from_directory
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -203,6 +203,10 @@ def agent_loop():
 @app.route("/")
 def index():
     return jsonify({"status": "TradingAgent API running", "cycle": state["cycle"]})
+
+@app.route("/dashboard")
+def dashboard():
+    return send_from_directory(".", "dashboard.html")
 
 @app.route("/state")
 def get_state():
