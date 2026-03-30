@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TradingAgent AI</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#111;}
+.header{background:#fff;border-bottom:1px solid #e0e0e0;padding:14px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
+.header h1{font-size:18px;font-weight:600;}
+.status-bar{display:flex;align-items:center;gap:8px;font-size:13px;}
+.pulse{width:8px;height:8px;border-radius:50%;display:inline-block;}
+.on{background:#1D9E75;animation:beat .9s infinite;}
+.off{background:#aaa;}
+.blink{background:#f59e0b;animation:beat .3s infinite;}
+@keyframes beat{0%,100%{opacity:1;}50%{opacity:.2;}}
+.container{max-width:1000px;margin:0 auto;padding:20px;}
+.mg{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}
+.mc{background:#fff;border-radius:10px;padding:14px 16px;border:1px solid #e8e8e8;}
+.ml{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;}
+.mv{font-size:22px;font-weight:600;color:#111;}
+.ms{font-size:12px;margin-top:3px;color:#888;}
+.g{color:#0F6E56;}
+.r{color:#A32D2D;}
+.card{background:#fff;border-radius:10px;padding:16px 20px;margin-bottom:16px;border:1px solid #e8e8e8;}
+.ct{font-size:13px;font-weight:600;color:#666;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;}
+.tabs{display:flex;gap:4px;border-bottom:1px solid #e0e0e0;margin-bottom:20px;}
+.tab{padding:9px 18px;font-size:13px;cursor:pointer;border:none;background:none;color:#888;border-bottom:2px solid transparent;margin-bottom:-1px;}
+.tab.active{color:#111;border-bottom:2px solid #111;font-weight:500;}
+.sp{display:none;}.sp.active{display:block;}
+.btn{padding:9px 20px;border-radius:8px;border:1px solid #ddd;background:#fff;color:#111;font-size:13px;cursor:pointer;}
+.btn:hover{background:#f5f5f5;}
+.btn-go{background:#1D9E75;color:#fff;border-color:#0F6E56;}
+.btn-go:hover{opacity:.88;}
+.btn-stop{background:#E24B4A;color:#fff;border-color:#A32D2D;}
+.btn-stop:hover{opacity:.88;}
+.badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:4px;font-weight:500;margin-left:4px;}
+.bg{background:#dcfce7;color:#166534;}
+.br{background:#fee2e2;color:#991b1b;}
+.bb{background:#dbeafe;color:#1e40af;}
+.ba{background:#fef9c3;color:#854d0e;}
+.bx{background:#f3f4f6;color:#555;}
+.row{display:grid;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid #f0f0f0;font-size:13px;}
+.row:last-child{border-bottom:none;}
+.rh{color:#888;font-size:11px;font-weight:600;}
+.logbox{background:#f9f9f9;border-radius:8px;padding:12px 14px;font-size:11.5px;font-family:monospace;line-height:1.85;max-height:380px;overflow-y:auto;}
+.le{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid #f0f0f0;}
+.le:last-child{border-bottom:none;}
+.lt{color:#aaa;min-width:68px;flex-shrink:0;}
+.buy{color:#0F6E56;font-weight:500;}
+.sell{color:#A32D2D;font-weight:500;}
+.think{color:#555;}
+.warn{color:#854F0B;}
+.sbar{height:5px;border-radius:3px;background:#f0f0f0;margin-top:5px;overflow:hidden;}
+.sfill{height:100%;border-radius:3px;transition:width .5s;}
+.cfg-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #f0f0f0;}
+.cfg-row:last-child{border-bottom:none;}
+.stat-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px;align-items:center;}
+.stat-row:last-child{border-bottom:none;}
+@media(max-width:600px){.mg{grid-template-columns:repeat(2,1fr);}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <h1>TradingAgent AI</h1>
+    <span style="font-size:12px;color:#888;">servidor 24/7 · simulación</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div class="status-bar">
+      <span class="pulse off" id="srv-pulse"></span>
+      <span id="srv-status" style="color:#888;">Conectando...</span>
+    </div>
+    <span id="last-sync" style="font-size:11px;color:#aaa;"></span>
+  </div>
+</div>
+
+<div class="container">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="pulse off" id="agent-pulse"></span>
+      <span id="agent-lbl" style="font-size:13px;color:#888;">—</span>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-go" id="btn-toggle" onclick="toggleAgent()">Iniciar agente</button>
+      <button class="btn" onclick="resetAgent()">Reiniciar portfolio</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('dash',this)">Dashboard</button>
+    <button class="tab" onclick="showTab('log',this)">Log en vivo</button>
+    <button class="tab" onclick="showTab('learn',this)">Aprendizaje</button>
+    <button class="tab" onclick="showTab('cfg',this)">Configurar</button>
+  </div>
+
+  <div id="tab-dash" class="sp active">
+    <div class="mg">
+      <div class="mc"><div class="ml">Capital total</div><div class="mv" id="m-cap">—</div><div class="ms" id="m-pct">—</div></div>
+      <div class="mc"><div class="ml">Cash libre</div><div class="mv" id="m-cash">—</div></div>
+      <div class="mc"><div class="ml">Operaciones</div><div class="mv" id="m-ops">—</div><div class="ms" id="m-wr">—</div></div>
+      <div class="mc"><div class="ml">Ciclo servidor</div><div class="mv" id="m-cyc">—</div><div class="ms" id="m-hist">—</div></div>
+    </div>
+    <div class="card">
+      <div class="ct">Posiciones abiertas <span id="npos" style="font-size:11px;font-weight:400;">—</span></div>
+      <div id="positions"><div style="padding:1.5rem 0;text-align:center;font-size:13px;color:#888;">Conectando...</div></div>
+    </div>
+    <div class="card">
+      <div class="ct">Últimas decisiones</div>
+      <div id="decisions"><div style="padding:1.5rem 0;text-align:center;font-size:13px;color:#888;">Esperando datos...</div></div>
+    </div>
+  </div>
+
+  <div id="tab-log" class="sp">
+    <div class="card">
+      <div class="ct">Log del servidor <span id="log-count" style="font-size:11px;font-weight:400;"></span></div>
+      <div class="logbox" id="logbox"><div style="color:#888;">Cargando...</div></div>
+    </div>
+  </div>
+
+  <div id="tab-learn" class="sp">
+    <div class="card">
+      <div class="ct">Score de confianza por activo</div>
+      <div id="scores"><div style="font-size:13px;color:#888;">Cargando...</div></div>
+    </div>
+    <div class="card">
+      <div class="ct">Patrones aprendidos</div>
+      <div id="patterns"><div style="font-size:13px;color:#888;">El agente detecta patrones tras 3+ operaciones por sector.</div></div>
+    </div>
+  </div>
+
+  <div id="tab-cfg" class="sp">
+    <div class="card">
+      <div class="ct">Parámetros del agente</div>
+      <div class="cfg-row">
+        <div><div style="font-size:13px;">Frecuencia de ciclos</div><div style="font-size:11px;color:#888;">Cada cuántos segundos opera</div></div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <input type="range" min="15" max="120" step="5" value="60" id="c-freq" oninput="document.getElementById('c-freq-v').textContent=this.value+'s'">
+          <span id="c-freq-v" style="font-size:13px;min-width:36px;">60s</span>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div><div style="font-size:13px;">Stop-loss</div><div style="font-size:11px;color:#888;">Corta pérdidas automáticamente</div></div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <input type="range" min="1" max="15" step="1" value="4" id="c-sl" oninput="document.getElementById('c-sl-v').textContent='-'+this.value+'%'">
+          <span id="c-sl-v" style="font-size:13px;min-width:36px;color:#A32D2D;">-4%</span>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div><div style="font-size:13px;">Take-profit</div><div style="font-size:11px;color:#888;">Asegura ganancias automáticamente</div></div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <input type="range" min="2" max="25" step="1" value="6" id="c-tp" oninput="document.getElementById('c-tp-v').textContent='+'+this.value+'%'">
+          <span id="c-tp-v" style="font-size:13px;min-width:36px;color:#0F6E56;">+6%</span>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div><div style="font-size:13px;">Tamaño por operación</div><div style="font-size:11px;color:#888;">% del capital por trade</div></div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <input type="range" min="5" max="35" step="5" value="20" id="c-sz" oninput="document.getElementById('c-sz-v').textContent=this.value+'%'">
+          <span id="c-sz-v" style="font-size:13px;min-width:36px;">20%</span>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div><div style="font-size:13px;">Agresividad</div><div style="font-size:11px;color:#888;">Qué tan fácil opera el agente</div></div>
+        <select id="c-risk">
+          <option value="conservative">Conservador</option>
+          <option value="balanced" selected>Balanceado</option>
+          <option value="aggressive">Agresivo</option>
+        </select>
+      </div>
+    </div>
+    <div style="text-align:right;"><button class="btn btn-go" onclick="saveConfig()">Guardar en servidor</button></div>
+  </div>
+</div>
+
+<script>
+const SECTOR={NVDA:'Chips IA',MSFT:'Cloud/IA',META:'IA Consumo',GOOGL:'IA/Search',AMZN:'Cloud',PLTR:'Data IA',ARKK:'ETF Tech',QQQ:'ETF NASDAQ',BTC:'Crypto',ETH:'Crypto'};
+let agentRunning=false;
+
+function fmt(n){return'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function fmtS(n){return(n>=0?'+':'')+fmt(n);}
+
+async function api(path,method='GET',body=null){
+  const opts={method,headers:{'Content-Type':'application/json'}};
+  if(body) opts.body=JSON.stringify(body);
+  const r=await fetch(path,opts);
+  return r.json();
+}
+
+async function fetchState(){
+  try{
+    const d=await api('/state');
+    updateSrv(true);
+    renderState(d);
+    agentRunning=d.running;
+    updateBtn(d.running);
+  }catch(e){ updateSrv(false); }
+}
+
+function updateSrv(ok){
+  document.getElementById('srv-pulse').className='pulse '+(ok?'on':'off');
+  const s=document.getElementById('srv-status');
+  s.textContent=ok?'Servidor activo':'Reconectando...';
+  s.style.color=ok?'#0F6E56':'#A32D2D';
+  if(ok) document.getElementById('last-sync').textContent='sync '+new Date().toLocaleTimeString('es-AR');
+}
+
+function updateBtn(running){
+  const btn=document.getElementById('btn-toggle');
+  const p=document.getElementById('agent-pulse');
+  const lbl=document.getElementById('agent-lbl');
+  if(running){
+    btn.textContent='Detener agente';btn.className='btn btn-stop';
+    p.className='pulse on';lbl.textContent='Activo';lbl.style.color='#0F6E56';
+  }else{
+    btn.textContent='Iniciar agente';btn.className='btn btn-go';
+    p.className='pulse off';lbl.textContent='Detenido';lbl.style.color='#888';
+  }
+}
+
+function renderState(d){
+  document.getElementById('m-cap').textContent=fmt(d.total||0);
+  const pEl=document.getElementById('m-pct');
+  pEl.textContent=(d.pnl_pct>=0?'+':'')+d.pnl_pct+'%';
+  pEl.className='ms '+(d.pnl_pct>=0?'g':'r');
+  document.getElementById('m-cash').textContent=fmt(d.cash||0);
+  document.getElementById('m-ops').textContent=d.history_count||0;
+  document.getElementById('m-wr').textContent='win rate '+(d.win_rate||0)+'%';
+  document.getElementById('m-cyc').textContent=d.cycle||0;
+  document.getElementById('m-hist').textContent=(d.history_count||0)+' ops totales';
+
+  const open=Object.entries(d.positions||{}).filter(([,p])=>p&&p.qty>0);
+  document.getElementById('npos').textContent=open.length+' activos';
+  const posEl=document.getElementById('positions');
+  if(!open.length){
+    posEl.innerHTML='<div style="padding:1.5rem 0;text-align:center;font-size:13px;color:#888;">Sin posiciones abiertas.</div>';
+  }else{
+    posEl.innerHTML='<div class="row rh" style="grid-template-columns:2fr 1fr 1fr 1fr;"><span>Activo</span><span>Entrada</span><span>Qty</span><span>Costo</span></div>'+
+    open.map(([sym,pos])=>`<div class="row" style="grid-template-columns:2fr 1fr 1fr 1fr;">
+      <span style="font-weight:600;">${sym}<span class="badge bb">${SECTOR[sym]||''}</span></span>
+      <span>${fmt(pos.avg_cost)}</span><span>${pos.qty}</span><span>${fmt(pos.qty*pos.avg_cost)}</span>
+    </div>`).join('');
+  }
+
+  const decs=(d.decisions||[]).slice(0,12);
+  const decEl=document.getElementById('decisions');
+  if(!decs.length){
+    decEl.innerHTML='<div style="padding:1.5rem 0;text-align:center;font-size:13px;color:#888;">Sin operaciones aún. Iniciá el agente.</div>';
+  }else{
+    decEl.innerHTML=decs.map(dec=>{
+      const cls=dec.action==='COMPRA'?'bg':dec.action==='VENTA'?'br':dec.action==='TP'?'bg':'br';
+      return `<div class="stat-row">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span style="font-weight:600;">${dec.sym}</span>
+          <span class="badge ${cls}">${dec.action}</span>
+          <span style="font-size:12px;color:#888;">${fmt(dec.price||0)} · ${dec.detail||''}</span>
+        </div>
+        <span style="font-size:11px;color:#aaa;">${dec.t||''}</span>
+      </div>`;
+    }).join('');
+  }
+
+  const logs=(d.log||[]).slice(0,100);
+  const box=document.getElementById('logbox');
+  if(logs.length){
+    box.innerHTML=logs.map(l=>{
+      const cls=l.type==='buy'?'buy':l.type==='sell'?'sell':l.type==='warn'?'warn':'think';
+      return `<div class="le"><span class="lt">${l.t||''}</span><span class="${cls}">${l.msg||''}</span></div>`;
+    }).join('');
+  }
+  document.getElementById('log-count').textContent=logs.length+' entradas';
+
+  const scores=d.scores||{};
+  const scEl=document.getElementById('scores');
+  const sorted=Object.entries(scores).sort((a,b)=>b[1].score-a[1].score);
+  scEl.innerHTML=sorted.map(([sym,sc])=>{
+    const wr=sc.trades>0?(sc.wins/sc.trades*100).toFixed(0)+'%':'—';
+    const col=sc.score>65?'#1D9E75':sc.score<35?'#E24B4A':'#f59e0b';
+    const sigCls=sc.last==='compra'?'bg':sc.last==='venta'?'br':'bx';
+    return `<div style="margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;">
+        <span style="font-weight:600;">${sym} <span style="color:#888;font-weight:400;">${SECTOR[sym]||''}</span></span>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span class="badge ${sigCls}">${sc.last||'—'}</span>
+          <span style="color:#888;">ops: ${sc.trades} · wr: ${wr}</span>
+          <span style="font-weight:600;color:${col};">${sc.score.toFixed(0)}/100</span>
+        </div>
+      </div>
+      <div class="sbar"><div class="sfill" style="width:${sc.score}%;background:${col};"></div></div>
+    </div>`;
+  }).join('');
+
+  const patterns=d.patterns||[];
+  const ptEl=document.getElementById('patterns');
+  ptEl.innerHTML=!patterns.length
+    ?'<div style="font-size:13px;color:#888;">El agente detecta patrones tras 3+ operaciones por sector.</div>'
+    :patterns.sort((a,b)=>b.wr-a.wr).map(p=>{
+      const cls=p.wr>=60?'bg':p.wr>=40?'ba':'br';
+      return `<div class="stat-row"><span>${p.sector} · ${p.ops} ops</span><span class="badge ${cls}">${p.wr}% win rate</span></div>`;
+    }).join('');
+
+  if(d.config){
+    document.getElementById('c-freq').value=d.config.freq||60;
+    document.getElementById('c-freq-v').textContent=(d.config.freq||60)+'s';
+    document.getElementById('c-sl').value=d.config.sl||4;
+    document.getElementById('c-sl-v').textContent='-'+(d.config.sl||4)+'%';
+    document.getElementById('c-tp').value=d.config.tp||6;
+    document.getElementById('c-tp-v').textContent='+'+(d.config.tp||6)+'%';
+    document.getElementById('c-sz').value=d.config.sz||20;
+    document.getElementById('c-sz-v').textContent=(d.config.sz||20)+'%';
+    if(d.config.risk) document.getElementById('c-risk').value=d.config.risk;
+  }
+}
+
+async function toggleAgent(){
+  try{
+    const d=await api(agentRunning?'/stop':'/start','POST');
+    agentRunning=d.running;
+    updateBtn(d.running);
+    setTimeout(fetchState,1000);
+  }catch(e){alert('Error al conectar.');}
+}
+
+async function resetAgent(){
+  if(!confirm('¿Reiniciar el portfolio? Se perderán todas las operaciones.')) return;
+  try{ await api('/reset','POST'); setTimeout(fetchState,500); }
+  catch(e){alert('Error.');}
+}
+
+async function saveConfig(){
+  const cfg={
+    freq:+document.getElementById('c-freq').value,
+    sl:+document.getElementById('c-sl').value,
+    tp:+document.getElementById('c-tp').value,
+    sz:+document.getElementById('c-sz').value,
+    risk:document.getElementById('c-risk').value
+  };
+  try{ await api('/config','POST',cfg); alert('Configuración guardada.'); }
+  catch(e){alert('Error.');}
+}
+
+function showTab(name,el){
+  document.querySelectorAll('.sp').forEach(e=>e.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  if(el) el.classList.add('active');
+}
+
+fetchState();
+setInterval(fetchState,10000);
+setInterval(()=>fetch('/').catch(()=>{}),600000);
+</script>
+</body>
+</html>
