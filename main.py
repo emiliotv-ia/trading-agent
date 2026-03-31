@@ -4,12 +4,46 @@ import random
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app)
 
-DATA_FILE = "agent_state.json"
-REPORTS_FILE = "reports_history.json"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+def init_db():
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_state (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                data JSONB NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id SERIAL PRIMARY KEY,
+                texto TEXT NOT NULL,
+                capital FLOAT,
+                pnl_pct FLOAT,
+                ops INTEGER,
+                win_rate INTEGER,
+                ciclos INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"DB init error: {e}")
 
 BASE_PRICES = {
     "NVDA": 875, "MSFT": 380, "META": 515, "GOOGL": 168,
@@ -44,36 +78,33 @@ def default_state():
     }
 
 def load_state():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE) as f:
-                return json.load(f)
-        except:
-            pass
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT data FROM agent_state WHERE id = 1")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    except Exception as e:
+        print(f"Load state error: {e}")
     return default_state()
 
 def save_state(s):
     try:
-        with open(DATA_FILE, "w") as f:
-            json.dump(s, f)
-    except:
-        pass
-
-def load_reports():
-    if os.path.exists(REPORTS_FILE):
-        try:
-            with open(REPORTS_FILE) as f:
-                return json.load(f)
-        except:
-            pass
-    return []
-
-def save_reports(reports):
-    try:
-        with open(REPORTS_FILE, "w") as f:
-            json.dump(reports, f)
-    except:
-        pass
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO agent_state (id, data, updated_at)
+            VALUES (1, %s, NOW())
+            ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()
+        """, (json.dumps(s), json.dumps(s)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"Save state error: {e}")
 
 def ts():
     return datetime.now().strftime("%H:%M:%S")
@@ -193,6 +224,7 @@ def run_cycle(s):
     if len(s["decisions"]) > 200: s["decisions"] = s["decisions"][:200]
     save_state(s)
 
+init_db()
 state = load_state()
 state["running"] = False
 
@@ -260,30 +292,49 @@ def history():
 @app.route("/save_report", methods=["POST"])
 def save_report():
     data = request.json
-    reports = load_reports()
-    report_entry = {
-        "id": len(reports) + 1,
-        "fecha": ts_full(),
-        "timestamp": datetime.now().isoformat(),
-        "texto": data.get("texto", ""),
-        "resumen": {
-            "capital": data.get("capital", 0),
-            "pnl_pct": data.get("pnl_pct", 0),
-            "ops": data.get("ops", 0),
-            "win_rate": data.get("win_rate", 0),
-            "ciclos": data.get("ciclos", 0)
-        }
-    }
-    reports.insert(0, report_entry)
-    if len(reports) > 100:
-        reports = reports[:100]
-    save_reports(reports)
-    return jsonify({"ok": True, "id": report_entry["id"], "total": len(reports)})
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO reports (texto, capital, pnl_pct, ops, win_rate, ciclos)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+        """, (data.get("texto",""), data.get("capital",0), data.get("pnl_pct",0),
+              data.get("ops",0), data.get("win_rate",0), data.get("ciclos",0)))
+        report_id = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM reports")
+        total = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"ok": True, "id": report_id, "total": total})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/reports")
 def get_reports():
-    reports = load_reports()
-    return jsonify({"reports": reports, "total": len(reports)})
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM reports ORDER BY created_at DESC LIMIT 100")
+        reports = []
+        for row in cur.fetchall():
+            reports.append({
+                "id": row["id"],
+                "fecha": row["created_at"].strftime("%d/%m/%Y %H:%M:%S"),
+                "texto": row["texto"],
+                "resumen": {
+                    "capital": row["capital"],
+                    "pnl_pct": row["pnl_pct"],
+                    "ops": row["ops"],
+                    "win_rate": row["win_rate"],
+                    "ciclos": row["ciclos"]
+                }
+            })
+        cur.close()
+        conn.close()
+        return jsonify({"reports": reports, "total": len(reports)})
+    except Exception as e:
+        return jsonify({"reports": [], "total": 0, "error": str(e)})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
