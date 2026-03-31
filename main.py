@@ -7,10 +7,94 @@ from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+# --- ALPACA ---
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteRequest
+
 app = Flask(__name__)
 CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY")
+ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+# Clientes Alpaca
+trading_client = None
+stock_data_client = None
+crypto_data_client = None
+
+def init_alpaca():
+    global trading_client, stock_data_client, crypto_data_client
+    try:
+        if ALPACA_API_KEY and ALPACA_SECRET_KEY:
+            paper = "paper" in ALPACA_BASE_URL
+            trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=paper)
+            stock_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            crypto_data_client = CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            print("✅ Alpaca conectado correctamente")
+        else:
+            print("⚠️  Variables Alpaca no encontradas — usando simulación de precios")
+    except Exception as e:
+        print(f"❌ Error conectando Alpaca: {e}")
+
+# Mapeo símbolos crypto para Alpaca
+CRYPTO_SYMBOLS = {"BTC": "BTC/USD", "ETH": "ETH/USD"}
+STOCK_SYMBOLS = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ"]
+
+def get_real_prices():
+    """Obtiene precios reales de Alpaca. Si falla, retorna None."""
+    prices = {}
+    try:
+        # Precios acciones
+        req = StockLatestQuoteRequest(symbol_or_symbols=STOCK_SYMBOLS)
+        quotes = stock_data_client.get_stock_latest_quote(req)
+        for sym in STOCK_SYMBOLS:
+            if sym in quotes:
+                q = quotes[sym]
+                mid = round((q.ask_price + q.bid_price) / 2, 2) if q.ask_price and q.bid_price else q.ask_price or q.bid_price
+                if mid and mid > 0:
+                    prices[sym] = mid
+    except Exception as e:
+        print(f"Error precios acciones: {e}")
+
+    try:
+        # Precios crypto
+        crypto_req = CryptoLatestQuoteRequest(symbol_or_symbols=list(CRYPTO_SYMBOLS.values()))
+        crypto_quotes = crypto_data_client.get_crypto_latest_quote(crypto_req)
+        for local_sym, alpaca_sym in CRYPTO_SYMBOLS.items():
+            if alpaca_sym in crypto_quotes:
+                q = crypto_quotes[alpaca_sym]
+                mid = round((q.ask_price + q.bid_price) / 2, 1) if q.ask_price and q.bid_price else q.ask_price or q.bid_price
+                if mid and mid > 0:
+                    prices[local_sym] = mid
+    except Exception as e:
+        print(f"Error precios crypto: {e}")
+
+    return prices if prices else None
+
+def place_alpaca_order(sym, qty, side):
+    """Envía una orden real a Alpaca paper trading."""
+    try:
+        # Crypto usa símbolo distinto
+        alpaca_sym = CRYPTO_SYMBOLS.get(sym, sym)
+        order_data = MarketOrderRequest(
+            symbol=alpaca_sym,
+            qty=qty,
+            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+            time_in_force=TimeInForce.GTC if sym in CRYPTO_SYMBOLS else TimeInForce.DAY
+        )
+        order = trading_client.submit_order(order_data)
+        print(f"✅ Orden Alpaca: {side.upper()} {qty} {alpaca_sym} → ID {order.id}")
+        return True
+    except Exception as e:
+        print(f"❌ Error orden Alpaca {side} {sym}: {e}")
+        return False
+
+# ---- DB ----
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, sslmode="require")
@@ -74,7 +158,8 @@ def default_state():
         "prices": {s: {"price": p, "move": 0, "trend": 0} for s, p in BASE_PRICES.items()},
         "patterns": [], "memory": [], "wins": 0, "losses": 0, "cycle": 0,
         "running": False, "last_cycle_time": 0,
-        "config": {"freq": 60, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"}
+        "config": {"freq": 60, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"},
+        "mode": "beta"  # "alpha" = simulación, "beta" = Alpaca paper
     }
 
 def load_state():
@@ -109,15 +194,13 @@ def save_state(s):
 def ts():
     return datetime.now().strftime("%H:%M:%S")
 
-def ts_full():
-    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
 def log(s, msg, t="think"):
     s["log"].insert(0, {"t": ts(), "msg": msg, "type": t})
     if len(s["log"]) > 300:
         s["log"] = s["log"][:300]
 
 def simulate_prices(s):
+    """Fallback: precios simulados si Alpaca no está disponible."""
     for sym in BASE_PRICES:
         vol = VOLATILITY[sym]
         shock = (random.random() - 0.5) * 2
@@ -129,6 +212,35 @@ def simulate_prices(s):
         elif sym == "ETH": np_ = round(np_, 1)
         else: np_ = round(np_, 2)
         s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(trend, 5)}
+
+def update_prices(s):
+    """Intenta obtener precios reales. Si falla, usa simulación."""
+    mode = s.get("mode", "alpha")
+    if mode == "beta" and trading_client:
+        real = get_real_prices()
+        if real:
+            for sym, new_price in real.items():
+                prev = s["prices"][sym]["price"]
+                move = round((new_price - prev) / prev, 5) if prev else 0
+                s["prices"][sym] = {"price": new_price, "move": move, "trend": move}
+            # Log indicador de fuente
+            missing = [s2 for s2 in BASE_PRICES if s2 not in real]
+            if missing:
+                # Para símbolos sin precio real, simular individualmente
+                for sym in missing:
+                    vol = VOLATILITY[sym]
+                    prev = s["prices"][sym]["price"]
+                    move = (random.random() - 0.5) * 2 * vol
+                    np_ = round(prev * (1 + move), 2)
+                    s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(move, 5)}
+            return True
+        else:
+            log(s, "⚠️ Sin precios Alpaca — usando simulación", "warn")
+            simulate_prices(s)
+            return False
+    else:
+        simulate_prices(s)
+        return False
 
 def gp(s, sym):
     return s["prices"][sym]["price"]
@@ -161,6 +273,11 @@ def check_sl_tp(s):
         if not reason: continue
         proceeds = round(pos["qty"] * cur, 2)
         pnl = round(proceeds - pos["qty"] * pos["avg_cost"], 2)
+
+        # Enviar orden real si estamos en Beta
+        if s.get("mode") == "beta" and trading_client:
+            place_alpaca_order(sym, pos["qty"], "sell")
+
         s["cash"] = round(s["cash"] + proceeds, 2)
         update_brain(s, sym, pnl > 0, ret)
         s["history"].insert(0, {"t": ts(), "sym": sym, "type": reason, "qty": pos["qty"], "price": cur, "pnl": pnl})
@@ -178,13 +295,18 @@ def run_cycle(s):
         return
     s["last_cycle_time"] = now
     s["cycle"] += 1
-    simulate_prices(s)
-    log(s, f"Ciclo #{s['cycle']}", "think")
+
+    # Actualizar precios (real o simulado según modo)
+    using_real = update_prices(s)
+    source = "📡 Alpaca" if using_real else "🎲 Simulado"
+    log(s, f"Ciclo #{s['cycle']} · Precios: {source}", "think")
+
     check_sl_tp(s)
     T = THRESHOLDS[s["config"]["risk"]]
     total = s["cash"] + sum(pos["qty"]*gp(s,sym) for sym,pos in s["positions"].items() if pos.get("qty",0)>0)
     budget = round(total * s["config"]["sz"] / 100, 2)
     bought = sold = held = 0
+
     for sym in BASE_PRICES:
         move = s["prices"][sym]["move"]
         vol = VOLATILITY[sym]
@@ -196,20 +318,31 @@ def run_cycle(s):
         has_pos = pos and pos.get("qty", 0) > 0
         price = gp(s, sym)
         s["scores"][sym]["last"] = "compra" if sig>=T["buy"] else "venta" if sig<=T["sell"] else "hold"
+
         if sig >= T["buy"] and not has_pos and s["cash"] > price * 0.001:
             spend = min(budget, s["cash"] * 0.9)
             qty = round(spend/price, 6 if price>10000 else 5 if price>1000 else 3 if price>100 else 2)
             cost = round(qty * price, 2)
             if qty > 0 and cost <= s["cash"] + 0.01:
+                # Enviar orden real si estamos en Beta
+                if s.get("mode") == "beta" and trading_client:
+                    place_alpaca_order(sym, qty, "buy")
+
                 s["cash"] = round(s["cash"] - cost, 2)
                 s["positions"][sym] = {"qty": qty, "avg_cost": price}
                 s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Compra", "qty": qty, "price": price, "pnl": None})
                 s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "COMPRA", "price": price, "detail": f"señal {sig}"})
                 log(s, f"COMPRA {qty} {sym} a ${price}", "buy")
                 bought += 1
+
         elif sig <= T["sell"] and has_pos:
             proceeds = round(pos["qty"]*price, 2)
             pnl = round(proceeds - pos["qty"]*pos["avg_cost"], 2)
+
+            # Enviar orden real si estamos en Beta
+            if s.get("mode") == "beta" and trading_client:
+                place_alpaca_order(sym, pos["qty"], "sell")
+
             s["cash"] = round(s["cash"] + proceeds, 2)
             update_brain(s, sym, pnl>0, (price-pos["avg_cost"])/pos["avg_cost"])
             s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Venta", "qty": pos["qty"], "price": price, "pnl": pnl})
@@ -220,17 +353,27 @@ def run_cycle(s):
             sold += 1
         else:
             held += 1
+
     if len(s["history"]) > 500: s["history"] = s["history"][:500]
     if len(s["decisions"]) > 200: s["decisions"] = s["decisions"][:200]
     save_state(s)
 
 init_db()
+init_alpaca()
 state = load_state()
 state["running"] = False
+# Asegurar que el modo quede en beta si las keys están presentes
+if ALPACA_API_KEY and ALPACA_SECRET_KEY:
+    state["mode"] = "beta"
 
 @app.route("/")
 def index():
-    return jsonify({"status": "TradingAgent API running", "cycle": state["cycle"]})
+    return jsonify({
+        "status": "TradingAgent API running",
+        "cycle": state["cycle"],
+        "mode": state.get("mode", "alpha"),
+        "alpaca_connected": trading_client is not None
+    })
 
 @app.route("/dashboard")
 def dashboard():
@@ -252,15 +395,18 @@ def get_state():
         "decisions": state["decisions"][:20], "log": state["log"][:100],
         "scores": state["scores"], "prices": state["prices"],
         "patterns": state["patterns"], "config": state["config"],
-        "history_count": len(state["history"])
+        "history_count": len(state["history"]),
+        "mode": state.get("mode", "alpha"),
+        "alpaca_connected": trading_client is not None
     })
 
 @app.route("/start", methods=["POST"])
 def start():
     state["running"] = True
     save_state(state)
-    log(state, "Agente iniciado", "think")
-    return jsonify({"ok": True, "running": True})
+    mode = state.get("mode", "alpha")
+    log(state, f"Agente iniciado · Modo: {mode.upper()}", "think")
+    return jsonify({"ok": True, "running": True, "mode": mode})
 
 @app.route("/stop", methods=["POST"])
 def stop():
@@ -275,19 +421,40 @@ def config():
     for k in ["freq","sl","tp","sz"]:
         if k in data: state["config"][k] = float(data[k])
     if "risk" in data: state["config"]["risk"] = data["risk"]
+    if "mode" in data: state["mode"] = data["mode"]
     save_state(state)
-    return jsonify({"ok": True, "config": state["config"]})
+    return jsonify({"ok": True, "config": state["config"], "mode": state.get("mode")})
 
 @app.route("/reset", methods=["POST"])
 def reset():
     global state
     state = default_state()
+    if ALPACA_API_KEY and ALPACA_SECRET_KEY:
+        state["mode"] = "beta"
     save_state(state)
     return jsonify({"ok": True})
 
 @app.route("/history")
 def history():
     return jsonify({"history": state["history"][:100]})
+
+@app.route("/alpaca/status")
+def alpaca_status():
+    """Endpoint para verificar conexión con Alpaca."""
+    if not trading_client:
+        return jsonify({"connected": False, "reason": "No hay keys configuradas"})
+    try:
+        account = trading_client.get_account()
+        return jsonify({
+            "connected": True,
+            "account_id": str(account.id),
+            "status": str(account.status),
+            "buying_power": str(account.buying_power),
+            "portfolio_value": str(account.portfolio_value),
+            "paper": "paper" in ALPACA_BASE_URL
+        })
+    except Exception as e:
+        return jsonify({"connected": False, "reason": str(e)})
 
 @app.route("/save_report", methods=["POST"])
 def save_report():
