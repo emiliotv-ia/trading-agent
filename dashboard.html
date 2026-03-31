@@ -9,7 +9,6 @@
 body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#111;}
 .header{background:#fff;border-bottom:1px solid #e0e0e0;padding:14px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
 .header h1{font-size:18px;font-weight:600;}
-.status-bar{display:flex;align-items:center;gap:8px;font-size:13px;}
 .pulse{width:8px;height:8px;border-radius:50%;display:inline-block;}
 .on{background:#1D9E75;animation:beat .9s infinite;}
 .off{background:#aaa;}
@@ -23,8 +22,8 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
 .g{color:#0F6E56;}.r{color:#A32D2D;}
 .card{background:#fff;border-radius:10px;padding:16px 20px;margin-bottom:16px;border:1px solid #e8e8e8;}
 .ct{font-size:13px;font-weight:600;color:#666;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;}
-.tabs{display:flex;gap:4px;border-bottom:1px solid #e0e0e0;margin-bottom:20px;}
-.tab{padding:9px 18px;font-size:13px;cursor:pointer;border:none;background:none;color:#888;border-bottom:2px solid transparent;margin-bottom:-1px;}
+.tabs{display:flex;gap:4px;border-bottom:1px solid #e0e0e0;margin-bottom:20px;flex-wrap:wrap;}
+.tab{padding:9px 16px;font-size:13px;cursor:pointer;border:none;background:none;color:#888;border-bottom:2px solid transparent;margin-bottom:-1px;}
 .tab.active{color:#111;border-bottom:2px solid #111;font-weight:500;}
 .sp{display:none;}.sp.active{display:block;}
 .btn{padding:9px 20px;border-radius:8px;border:1px solid #ddd;background:#fff;color:#111;font-size:13px;cursor:pointer;}
@@ -33,7 +32,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
 .btn-go:hover{opacity:.88;}
 .btn-stop{background:#E24B4A;color:#fff;border-color:#A32D2D;}
 .btn-stop:hover{opacity:.88;}
-.btn-report{background:#3266ad;color:#fff;border-color:#1e4a8a;font-weight:500;padding:10px 22px;font-size:14px;}
+.btn-report{background:#3266ad;color:#fff;border-color:#1e4a8a;font-weight:500;}
 .btn-report:hover{opacity:.88;}
 .badge{display:inline-block;font-size:10px;padding:2px 7px;border-radius:4px;font-weight:500;margin-left:4px;}
 .bg{background:#dcfce7;color:#166534;}
@@ -57,10 +56,16 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
 .cfg-row:last-child{border-bottom:none;}
 .stat-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f0f0f0;font-size:13px;align-items:center;}
 .stat-row:last-child{border-bottom:none;}
-.report-box{background:#f0f7ff;border:1px solid #b3d4f5;border-radius:10px;padding:18px 20px;font-size:14px;line-height:1.8;white-space:pre-wrap;font-family:system-ui;color:#111;margin-top:12px;}
-.copy-btn{background:#fff;border:1px solid #b3d4f5;color:#1e4a8a;padding:8px 18px;border-radius:8px;font-size:13px;cursor:pointer;margin-top:12px;}
+.report-box{background:#f0f7ff;border:1px solid #b3d4f5;border-radius:10px;padding:18px 20px;font-size:13px;line-height:1.8;white-space:pre-wrap;font-family:monospace;color:#111;margin-top:12px;max-height:400px;overflow-y:auto;}
+.copy-btn{background:#fff;border:1px solid #b3d4f5;color:#1e4a8a;padding:8px 18px;border-radius:8px;font-size:13px;cursor:pointer;margin-top:10px;margin-right:8px;}
 .copy-btn:hover{background:#e8f0fe;}
-.report-intro{font-size:13px;color:#555;margin-bottom:12px;line-height:1.6;}
+.hist-item{background:#f9f9f9;border:1px solid #e8e8e8;border-radius:8px;padding:12px 16px;margin-bottom:10px;}
+.hist-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+.hist-num{font-size:11px;background:#3266ad;color:#fff;padding:2px 8px;border-radius:4px;font-weight:500;}
+.hist-date{font-size:11px;color:#888;}
+.hist-stats{display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;}
+.hist-stat{font-size:12px;color:#555;}
+.hist-stat span{font-weight:600;color:#111;}
 @media(max-width:600px){.mg{grid-template-columns:repeat(2,1fr);}}
 </style>
 </head>
@@ -72,10 +77,8 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     <span style="font-size:12px;color:#888;">servidor 24/7 · simulación</span>
   </div>
   <div style="display:flex;align-items:center;gap:10px;">
-    <div class="status-bar">
-      <span class="pulse off" id="srv-pulse"></span>
-      <span id="srv-status" style="color:#888;">Conectando...</span>
-    </div>
+    <span class="pulse off" id="srv-pulse"></span>
+    <span id="srv-status" style="color:#888;font-size:13px;">Conectando...</span>
     <span id="last-sync" style="font-size:11px;color:#aaa;"></span>
   </div>
 </div>
@@ -99,6 +102,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     <button class="tab" onclick="showTab('learn',this)">Aprendizaje</button>
     <button class="tab" onclick="showTab('cfg',this)">Configurar</button>
     <button class="tab" onclick="showTab('reporte',this)">Reporte Claude</button>
+    <button class="tab" onclick="showTab('historial',this);loadReportHistory()">Historial reportes</button>
   </div>
 
   <div id="tab-dash" class="sp active">
@@ -181,18 +185,29 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
 
   <div id="tab-reporte" class="sp">
     <div class="card">
-      <div class="ct">Reporte para pegarlo a Claude</div>
-      <p class="report-intro">
-        Hacé clic en <strong>Generar reporte</strong>, copiá el texto que aparece y pegalo al inicio de tu próxima conversación con Claude. Él lo va a leer y te va a dar el resumen automáticamente antes de responder lo que necesitás.
+      <div class="ct">Reporte para Claude</div>
+      <p style="font-size:13px;color:#555;margin-bottom:14px;line-height:1.6;">
+        Hacé clic en <strong>Generar y guardar reporte</strong>. El reporte se guarda automáticamente en el servidor para poder compararlo con futuros reportes. Luego copialo y pegalo en Claude.
       </p>
       <div style="text-align:center;margin-bottom:12px;">
-        <button class="btn btn-report" onclick="generarReporte()">Generar reporte</button>
+        <button class="btn btn-report" onclick="generarReporte()">Generar y guardar reporte</button>
       </div>
       <div id="reporte-box" style="display:none;">
         <div class="report-box" id="reporte-texto"></div>
-        <button class="copy-btn" onclick="copiarReporte()">Copiar al portapapeles</button>
-        <div id="copy-ok" style="font-size:12px;color:#0F6E56;margin-top:6px;display:none;">Copiado. Ahora pegalo en Claude.</div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <button class="copy-btn" onclick="copiarReporte()">Copiar al portapapeles</button>
+          <span id="copy-ok" style="font-size:12px;color:#0F6E56;display:none;">Copiado. Ahora pegalo en Claude.</span>
+          <span id="save-ok" style="font-size:12px;color:#3266ad;display:none;"></span>
+        </div>
       </div>
+    </div>
+  </div>
+
+  <div id="tab-historial" class="sp">
+    <div class="card">
+      <div class="ct">Historial de reportes guardados <span id="hist-count" style="font-size:11px;font-weight:400;color:#888;"></span></div>
+      <p style="font-size:13px;color:#555;margin-bottom:14px;">Todos los reportes que generaste, guardados para comparar la evolución del agente.</p>
+      <div id="hist-list"><div style="font-size:13px;color:#888;text-align:center;padding:2rem 0;">Cargando historial...</div></div>
     </div>
   </div>
 </div>
@@ -337,7 +352,7 @@ function renderState(d){
   }
 }
 
-function generarReporte(){
+async function generarReporte(){
   if(!lastData){alert('Esperá a que carguen los datos del servidor.');return;}
   const d=lastData;
   const total=d.total||1000;
@@ -354,32 +369,17 @@ function generarReporte(){
   const positions=Object.entries(d.positions||{}).filter(([,p])=>p&&p.qty>0);
   const decisions=(d.decisions||[]).slice(0,5);
 
-  const topActivos=Object.entries(scores)
-    .sort((a,b)=>b[1].score-a[1].score)
-    .slice(0,3)
-    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100, ops: ${sc.trades}, win rate: ${sc.trades>0?(sc.wins/sc.trades*100).toFixed(0)+'%':'sin ops'})`)
-    .join('\n  - ');
+  const topActivos=Object.entries(scores).sort((a,b)=>b[1].score-a[1].score).slice(0,3)
+    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100, ops: ${sc.trades}, win rate: ${sc.trades>0?(sc.wins/sc.trades*100).toFixed(0)+'%':'sin ops'})`).join('\n  - ');
+  const bottomActivos=Object.entries(scores).sort((a,b)=>a[1].score-b[1].score).slice(0,3)
+    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100)`).join('\n  - ');
+  const posAbiertas=positions.length>0?positions.map(([sym,pos])=>`${sym}: ${pos.qty} unidades a $${pos.avg_cost}`).join('\n  - '):'Ninguna';
+  const patronesTxt=patterns.length>0?patterns.sort((a,b)=>b.wr-a.wr).map(p=>`${p.sector}: ${p.wr}% de aciertos en ${p.ops} operaciones`).join('\n  - '):'Sin patrones detectados aún';
+  const ultDecs=decisions.length>0?decisions.map(dec=>`[${dec.t}] ${dec.action} ${dec.sym} a $${dec.price} · ${dec.detail||''}`).join('\n  - '):'Sin operaciones recientes';
 
-  const bottomActivos=Object.entries(scores)
-    .sort((a,b)=>a[1].score-b[1].score)
-    .slice(0,3)
-    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100)`)
-    .join('\n  - ');
-
-  const posAbiertas=positions.length>0
-    ? positions.map(([sym,pos])=>`${sym}: ${pos.qty} unidades a $${pos.avg_cost}`).join('\n  - ')
-    : 'Ninguna';
-
-  const patronesTxt=patterns.length>0
-    ? patterns.sort((a,b)=>b.wr-a.wr).map(p=>`${p.sector}: ${p.wr}% de aciertos en ${p.ops} operaciones`).join('\n  - ')
-    : 'Sin patrones detectados aún (se necesitan más operaciones)';
-
-  const ultDecisiones=decisions.length>0
-    ? decisions.map(d=>`[${d.t}] ${d.action} ${d.sym} a $${d.price} · ${d.detail||''}`).join('\n  - ')
-    : 'Sin operaciones recientes';
-
+  const fechaGen=new Date().toLocaleString('es-AR');
   const reporte=`--- REPORTE AUTOMÁTICO TRADINGAGENT AI ---
-Fecha de generación: ${new Date().toLocaleString('es-AR')}
+Fecha de generación: ${fechaGen}
 
 RESUMEN GENERAL:
 - Capital inicial: $1,000.00
@@ -407,21 +407,65 @@ PATRONES APRENDIDOS:
   - ${patronesTxt}
 
 ÚLTIMAS DECISIONES DEL AGENTE:
-  - ${ultDecisiones}
+  - ${ultDecs}
 
 --- FIN DEL REPORTE ---
 Por favor, analizá este reporte y dame un resumen en lenguaje simple de cómo viene la simulación, comparando con el reporte anterior si lo recordás. Luego respondé mi consulta de hoy.`;
 
   document.getElementById('reporte-texto').textContent=reporte;
   document.getElementById('reporte-box').style.display='block';
+
+  try{
+    const res=await api('/save_report','POST',{
+      texto:reporte, capital:total, pnl_pct:pnlPct,
+      ops, win_rate:wr, ciclos
+    });
+    const saveEl=document.getElementById('save-ok');
+    saveEl.textContent=`Reporte #${res.id} guardado en el servidor (total: ${res.total} reportes)`;
+    saveEl.style.display='inline';
+    setTimeout(()=>saveEl.style.display='none',5000);
+  }catch(e){}
 }
 
 function copiarReporte(){
   const txt=document.getElementById('reporte-texto').textContent;
   navigator.clipboard.writeText(txt).then(()=>{
-    document.getElementById('copy-ok').style.display='block';
-    setTimeout(()=>document.getElementById('copy-ok').style.display='none',4000);
+    const el=document.getElementById('copy-ok');
+    el.style.display='inline';
+    setTimeout(()=>el.style.display='none',4000);
   });
+}
+
+async function loadReportHistory(){
+  try{
+    const data=await api('/reports');
+    const reports=data.reports||[];
+    document.getElementById('hist-count').textContent=reports.length+' reportes guardados';
+    const el=document.getElementById('hist-list');
+    if(!reports.length){
+      el.innerHTML='<div style="font-size:13px;color:#888;text-align:center;padding:2rem 0;">No hay reportes guardados aún. Generá tu primer reporte desde la pestaña "Reporte Claude".</div>';
+      return;
+    }
+    el.innerHTML=reports.map(r=>{
+      const pnlCls=r.resumen.pnl_pct>=0?'g':'r';
+      const pnlTxt=(r.resumen.pnl_pct>=0?'+':'')+r.resumen.pnl_pct+'%';
+      return `<div class="hist-item">
+        <div class="hist-header">
+          <span class="hist-num">Reporte #${r.id}</span>
+          <span class="hist-date">${r.fecha}</span>
+        </div>
+        <div class="hist-stats">
+          <div class="hist-stat">Capital: <span>$${r.resumen.capital.toFixed(2)}</span></div>
+          <div class="hist-stat">Resultado: <span class="${pnlCls}">${pnlTxt}</span></div>
+          <div class="hist-stat">Operaciones: <span>${r.resumen.ops}</span></div>
+          <div class="hist-stat">Win rate: <span>${r.resumen.win_rate}%</span></div>
+          <div class="hist-stat">Ciclos: <span>${r.resumen.ciclos}</span></div>
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){
+    document.getElementById('hist-list').innerHTML='<div style="font-size:13px;color:#888;">Error al cargar el historial.</div>';
+  }
 }
 
 async function toggleAgent(){
