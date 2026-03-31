@@ -9,6 +9,7 @@ app = Flask(__name__)
 CORS(app)
 
 DATA_FILE = "agent_state.json"
+REPORTS_FILE = "reports_history.json"
 
 BASE_PRICES = {
     "NVDA": 875, "MSFT": 380, "META": 515, "GOOGL": 168,
@@ -58,8 +59,27 @@ def save_state(s):
     except:
         pass
 
+def load_reports():
+    if os.path.exists(REPORTS_FILE):
+        try:
+            with open(REPORTS_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def save_reports(reports):
+    try:
+        with open(REPORTS_FILE, "w") as f:
+            json.dump(reports, f)
+    except:
+        pass
+
 def ts():
     return datetime.now().strftime("%H:%M:%S")
+
+def ts_full():
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 def log(s, msg, t="think"):
     s["log"].insert(0, {"t": ts(), "msg": msg, "type": t})
@@ -128,7 +148,7 @@ def run_cycle(s):
     s["last_cycle_time"] = now
     s["cycle"] += 1
     simulate_prices(s)
-    log(s, f"━━ Ciclo #{s['cycle']} ━━", "think")
+    log(s, f"Ciclo #{s['cycle']}", "think")
     check_sl_tp(s)
     T = THRESHOLDS[s["config"]["risk"]]
     total = s["cash"] + sum(pos["qty"]*gp(s,sym) for sym,pos in s["positions"].items() if pos.get("qty",0)>0)
@@ -154,7 +174,7 @@ def run_cycle(s):
                 s["positions"][sym] = {"qty": qty, "avg_cost": price}
                 s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Compra", "qty": qty, "price": price, "pnl": None})
                 s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "COMPRA", "price": price, "detail": f"señal {sig}"})
-                log(s, f"COMPRA {qty} {sym} a ${price} · señal {sig}", "buy")
+                log(s, f"COMPRA {qty} {sym} a ${price}", "buy")
                 bought += 1
         elif sig <= T["sell"] and has_pos:
             proceeds = round(pos["qty"]*price, 2)
@@ -171,7 +191,6 @@ def run_cycle(s):
             held += 1
     if len(s["history"]) > 500: s["history"] = s["history"][:500]
     if len(s["decisions"]) > 200: s["decisions"] = s["decisions"][:200]
-    log(s, f"Compras: {bought} · Ventas: {sold} · Hold: {held}", "think")
     save_state(s)
 
 state = load_state()
@@ -237,6 +256,34 @@ def reset():
 @app.route("/history")
 def history():
     return jsonify({"history": state["history"][:100]})
+
+@app.route("/save_report", methods=["POST"])
+def save_report():
+    data = request.json
+    reports = load_reports()
+    report_entry = {
+        "id": len(reports) + 1,
+        "fecha": ts_full(),
+        "timestamp": datetime.now().isoformat(),
+        "texto": data.get("texto", ""),
+        "resumen": {
+            "capital": data.get("capital", 0),
+            "pnl_pct": data.get("pnl_pct", 0),
+            "ops": data.get("ops", 0),
+            "win_rate": data.get("win_rate", 0),
+            "ciclos": data.get("ciclos", 0)
+        }
+    }
+    reports.insert(0, report_entry)
+    if len(reports) > 100:
+        reports = reports[:100]
+    save_reports(reports)
+    return jsonify({"ok": True, "id": report_entry["id"], "total": len(reports)})
+
+@app.route("/reports")
+def get_reports():
+    reports = load_reports()
+    return jsonify({"reports": reports, "total": len(reports)})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
