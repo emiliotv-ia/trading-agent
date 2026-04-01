@@ -16,6 +16,7 @@ from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteReque
 from alpaca.data.timeframe import TimeFrame
 from datetime import timedelta
 import threading
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -163,13 +164,12 @@ def run_backtest(s, days=200):
         print(f"❌ Error descargando histórico crypto: {e}")
 
     # Procesar los datos día por día para entrenar el cerebro
-    # Usar el máximo de días disponibles entre los símbolos principales
     available = {sym: len(v) for sym, v in historical_prices.items() if len(v) >= 2}
     if not available:
         print("⚠️ Datos históricos insuficientes para backtest")
         log(s, "⚠️ Datos históricos insuficientes", "warn")
         return
-    min_days = max(available.values())  # usar el máximo disponible
+    min_days = max(available.values())
     print(f"📊 Días disponibles por símbolo: {available}")
     if min_days < 2:
         print("⚠️ Datos históricos insuficientes para backtest")
@@ -181,7 +181,6 @@ def run_backtest(s, days=200):
     bt_trades = 0
 
     for i in range(1, min_days):
-        # Actualizar precios del estado con datos históricos del día i
         for sym in BASE_PRICES:
             prices_list = historical_prices.get(sym, [])
             if len(prices_list) > i:
@@ -190,20 +189,18 @@ def run_backtest(s, days=200):
                 move = round((curr - prev) / prev, 5) if prev else 0
                 s["prices"][sym] = {"price": curr, "move": move, "trend": move}
 
-        # Simular lógica de trading (sin órdenes reales)
         T = THRESHOLDS[s["config"]["risk"]]
         for sym in BASE_PRICES:
             move = s["prices"][sym]["move"]
             vol = VOLATILITY[sym]
             sc = s["scores"][sym]["score"]
-            mult = 1.4  # balanced
+            mult = 1.4
             sig = round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
 
             pos = s["positions"].get(sym)
             has_pos = pos and pos.get("qty", 0) > 0
             price = s["prices"][sym]["price"]
 
-            # Simular compra
             if sig >= T["buy"] and not has_pos and s["cash"] > price * 0.001:
                 budget = round(s["cash"] * 0.2, 2)
                 qty = round(budget / price, 3)
@@ -213,7 +210,6 @@ def run_backtest(s, days=200):
                     s["positions"][sym] = {"qty": qty, "avg_cost": price}
                     bt_trades += 1
 
-            # Simular venta
             elif sig <= T["sell"] and has_pos:
                 proceeds = round(pos["qty"] * price, 2)
                 pnl = proceeds - pos["qty"] * pos["avg_cost"]
@@ -228,7 +224,6 @@ def run_backtest(s, days=200):
                 else:
                     bt_losses += 1
 
-        # Check SL/TP histórico simplificado
         sl = s["config"]["sl"] / 100
         tp = s["config"]["tp"] / 100
         for sym in list(s["positions"].keys()):
@@ -249,13 +244,11 @@ def run_backtest(s, days=200):
                 else:
                     bt_losses += 1
 
-    # Cerrar posiciones abiertas al finalizar backtest
     for sym in list(s["positions"].keys()):
         pos = s["positions"].get(sym)
         if pos and pos.get("qty", 0) > 0:
             pos["qty"] = 0
 
-    # Resetear cash al valor original — el backtest solo entrena, no cambia capital
     s["cash"] = s["start_cap"]
     s["wins"] = 0
     s["losses"] = 0
@@ -340,7 +333,7 @@ def default_state():
         "patterns": [], "memory": [], "wins": 0, "losses": 0, "cycle": 0,
         "running": False, "last_cycle_time": 0,
         "config": {"freq": 60, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"},
-        "mode": "beta"  # "alpha" = simulación, "beta" = Alpaca paper
+        "mode": "beta"
     }
 
 def load_state():
@@ -404,10 +397,8 @@ def update_prices(s):
                 prev = s["prices"][sym]["price"]
                 move = round((new_price - prev) / prev, 5) if prev else 0
                 s["prices"][sym] = {"price": new_price, "move": move, "trend": move}
-            # Log indicador de fuente
             missing = [s2 for s2 in BASE_PRICES if s2 not in real]
             if missing:
-                # Para símbolos sin precio real, simular individualmente
                 for sym in missing:
                     vol = VOLATILITY[sym]
                     prev = s["prices"][sym]["price"]
@@ -455,7 +446,6 @@ def check_sl_tp(s):
         proceeds = round(pos["qty"] * cur, 2)
         pnl = round(proceeds - pos["qty"] * pos["avg_cost"], 2)
 
-        # Enviar orden real si estamos en Beta
         if s.get("mode") == "beta" and trading_client:
             place_alpaca_order(sym, pos["qty"], "sell")
 
@@ -468,7 +458,6 @@ def check_sl_tp(s):
         pos["qty"] = 0
 
 def run_cycle(s):
-    import time
     now = time.time()
     freq = s["config"].get("freq", 60)
     last = s.get("last_cycle_time", 0)
@@ -477,7 +466,6 @@ def run_cycle(s):
     s["last_cycle_time"] = now
     s["cycle"] += 1
 
-    # Actualizar precios (real o simulado según modo)
     using_real = update_prices(s)
     source = "📡 Alpaca" if using_real else "🎲 Simulado"
     log(s, f"Ciclo #{s['cycle']} · Precios: {source}", "think")
@@ -505,7 +493,6 @@ def run_cycle(s):
             qty = round(spend/price, 6 if price>10000 else 5 if price>1000 else 3 if price>100 else 2)
             cost = round(qty * price, 2)
             if qty > 0 and cost <= s["cash"] + 0.01:
-                # Enviar orden real si estamos en Beta
                 if s.get("mode") == "beta" and trading_client:
                     place_alpaca_order(sym, qty, "buy")
 
@@ -520,7 +507,6 @@ def run_cycle(s):
             proceeds = round(pos["qty"]*price, 2)
             pnl = round(proceeds - pos["qty"]*pos["avg_cost"], 2)
 
-            # Enviar orden real si estamos en Beta
             if s.get("mode") == "beta" and trading_client:
                 place_alpaca_order(sym, pos["qty"], "sell")
 
@@ -543,11 +529,9 @@ init_db()
 init_alpaca()
 state = load_state()
 state["running"] = False
-# Asegurar que el modo quede en beta si las keys están presentes
 if ALPACA_API_KEY and ALPACA_SECRET_KEY:
     state["mode"] = "beta"
 
-# Auto-backtest: solo si no tiene historial previo
 if stock_data_client and not state.get("backtest_done") and len(state.get("memory", [])) == 0:
     print("🧠 Sin historial detectado — lanzando backtest automático en segundo plano...")
     bt_thread = threading.Thread(target=run_backtest, args=(state, 200), daemon=True)
@@ -555,6 +539,24 @@ if stock_data_client and not state.get("backtest_done") and len(state.get("memor
 else:
     if state.get("backtest_done"):
         print("✅ Backtest previo detectado — omitiendo")
+
+# -------------------------------------------------------
+# BACKGROUND LOOP — corre el agente 24/7 sin depender
+# de que alguien visite el dashboard
+# -------------------------------------------------------
+def background_loop():
+    print("🔄 Background loop iniciado — el agente corre 24/7")
+    while True:
+        try:
+            if state["running"]:
+                run_cycle(state)
+        except Exception as e:
+            print(f"❌ Error en background loop: {e}")
+        time.sleep(5)  # chequea cada 5 segundos si hay que correr un ciclo
+
+bg_thread = threading.Thread(target=background_loop, daemon=True)
+bg_thread.start()
+# -------------------------------------------------------
 
 @app.route("/")
 def index():
