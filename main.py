@@ -149,8 +149,14 @@ def run_backtest(s, days=200):
         print(f"❌ Error descargando histórico crypto: {e}")
 
     # Procesar los datos día por día para entrenar el cerebro
-    # Encontrar la cantidad mínima de días disponibles entre todos los símbolos
-    min_days = min((len(v) for v in historical_prices.values() if v), default=0)
+    # Usar el máximo de días disponibles entre los símbolos principales
+    available = {sym: len(v) for sym, v in historical_prices.items() if len(v) >= 2}
+    if not available:
+        print("⚠️ Datos históricos insuficientes para backtest")
+        log(s, "⚠️ Datos históricos insuficientes", "warn")
+        return
+    min_days = max(available.values())  # usar el máximo disponible
+    print(f"📊 Días disponibles por símbolo: {available}")
     if min_days < 2:
         print("⚠️ Datos históricos insuficientes para backtest")
         log(s, "⚠️ Datos históricos insuficientes", "warn")
