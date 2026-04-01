@@ -53,7 +53,6 @@ def get_real_prices():
     """Obtiene precios reales de Alpaca. Si falla, retorna None."""
     prices = {}
     try:
-        # Precios acciones
         req = StockLatestQuoteRequest(symbol_or_symbols=STOCK_SYMBOLS)
         quotes = stock_data_client.get_stock_latest_quote(req)
         for sym in STOCK_SYMBOLS:
@@ -66,7 +65,6 @@ def get_real_prices():
         print(f"Error precios acciones: {e}")
 
     try:
-        # Precios crypto
         crypto_req = CryptoLatestQuoteRequest(symbol_or_symbols=list(CRYPTO_SYMBOLS.values()))
         crypto_quotes = crypto_data_client.get_crypto_latest_quote(crypto_req)
         for local_sym, alpaca_sym in CRYPTO_SYMBOLS.items():
@@ -83,7 +81,6 @@ def get_real_prices():
 def place_alpaca_order(sym, qty, side):
     """Envía una orden real a Alpaca paper trading."""
     try:
-        # Crypto usa símbolo distinto
         alpaca_sym = CRYPTO_SYMBOLS.get(sym, sym)
         order_data = MarketOrderRequest(
             symbol=alpaca_sym,
@@ -99,11 +96,6 @@ def place_alpaca_order(sym, qty, side):
         return False
 
 def run_backtest(s, days=200):
-    """
-    Descarga datos históricos de Alpaca y entrena el cerebro del agente.
-    Solo se ejecuta si el agente no tiene historial previo.
-    No ejecuta órdenes reales — solo actualiza scores y patrones.
-    """
     if not stock_data_client:
         print("⚠️ Backtest omitido — Alpaca no disponible")
         return
@@ -116,7 +108,6 @@ def run_backtest(s, days=200):
     start_str = start.strftime("%Y-%m-%d")
     end_str = end.strftime("%Y-%m-%d")
 
-    # Descargar barras diarias de acciones
     historical_prices = {sym: [] for sym in BASE_PRICES}
     try:
         req = StockBarsRequest(
@@ -140,7 +131,6 @@ def run_backtest(s, days=200):
     except Exception as e:
         print(f"❌ Error descargando histórico acciones: {e}")
 
-    # Descargar barras diarias de crypto
     try:
         crypto_req = CryptoBarsRequest(
             symbol_or_symbols=list(CRYPTO_SYMBOLS.values()),
@@ -163,7 +153,6 @@ def run_backtest(s, days=200):
     except Exception as e:
         print(f"❌ Error descargando histórico crypto: {e}")
 
-    # Procesar los datos día por día para entrenar el cerebro
     available = {sym: len(v) for sym, v in historical_prices.items() if len(v) >= 2}
     if not available:
         print("⚠️ Datos históricos insuficientes para backtest")
@@ -374,7 +363,6 @@ def log(s, msg, t="think"):
         s["log"] = s["log"][:300]
 
 def simulate_prices(s):
-    """Fallback: precios simulados si Alpaca no está disponible."""
     for sym in BASE_PRICES:
         vol = VOLATILITY[sym]
         shock = (random.random() - 0.5) * 2
@@ -388,7 +376,6 @@ def simulate_prices(s):
         s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(trend, 5)}
 
 def update_prices(s):
-    """Intenta obtener precios reales. Si falla, usa simulación."""
     mode = s.get("mode", "alpha")
     if mode == "beta" and trading_client:
         real = get_real_prices()
@@ -528,9 +515,21 @@ def run_cycle(s):
 init_db()
 init_alpaca()
 state = load_state()
-state["running"] = False
+
+# -------------------------------------------------------
+# AUTO-RESTART — recuerda si el agente estaba corriendo
+# antes de un reinicio del servidor
+# -------------------------------------------------------
 if ALPACA_API_KEY and ALPACA_SECRET_KEY:
     state["mode"] = "beta"
+
+was_running = state.get("running", False)
+if was_running:
+    print("🔄 El agente estaba corriendo antes del reinicio — reanudando automáticamente")
+    log(state, "🔄 Servidor reiniciado — agente reanudado automáticamente", "think")
+else:
+    print("⏸️  Agente detenido (estado guardado)")
+# -------------------------------------------------------
 
 if stock_data_client and not state.get("backtest_done") and len(state.get("memory", [])) == 0:
     print("🧠 Sin historial detectado — lanzando backtest automático en segundo plano...")
@@ -552,7 +551,7 @@ def background_loop():
                 run_cycle(state)
         except Exception as e:
             print(f"❌ Error en background loop: {e}")
-        time.sleep(5)  # chequea cada 5 segundos si hay que correr un ciclo
+        time.sleep(5)
 
 bg_thread = threading.Thread(target=background_loop, daemon=True)
 bg_thread.start()
@@ -641,7 +640,6 @@ def backtest_status():
 
 @app.route("/alpaca/status")
 def alpaca_status():
-    """Endpoint para verificar conexión con Alpaca."""
     if not trading_client:
         return jsonify({"connected": False, "reason": "No hay keys configuradas"})
     try:
