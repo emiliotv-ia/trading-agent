@@ -50,7 +50,6 @@ CRYPTO_SYMBOLS = {"BTC": "BTC/USD", "ETH": "ETH/USD"}
 STOCK_SYMBOLS = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ"]
 
 def get_real_prices():
-    """Obtiene precios reales de Alpaca. Si falla, retorna None."""
     prices = {}
     try:
         req = StockLatestQuoteRequest(symbol_or_symbols=STOCK_SYMBOLS)
@@ -79,7 +78,6 @@ def get_real_prices():
     return prices if prices else None
 
 def place_alpaca_order(sym, qty, side):
-    """Envía una orden real a Alpaca paper trading."""
     try:
         alpaca_sym = CRYPTO_SYMBOLS.get(sym, sym)
         order_data = MarketOrderRequest(
@@ -469,7 +467,10 @@ def run_cycle(s):
         sc = s["scores"][sym]["score"]
         risk = s["config"]["risk"]
         mult = 2.5 if risk=="aggressive" else 0.7 if risk=="conservative" else 1.4
-        sig = round((move/vol)*mult + ((sc-50)/50)*0.4*0.2, 3)
+
+        # Señal limpia — sin ruido aleatorio
+        sig = round((move/vol)*mult + ((sc-50)/50)*0.4, 3)
+
         pos = s["positions"].get(sym)
         has_pos = pos and pos.get("qty", 0) > 0
         price = gp(s, sym)
