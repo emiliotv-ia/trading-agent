@@ -12,7 +12,10 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
-from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteRequest
+from alpaca.data.requests import StockLatestQuoteRequest, CryptoLatestQuoteRequest, StockBarsRequest, CryptoBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from datetime import timedelta
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -93,6 +96,164 @@ def place_alpaca_order(sym, qty, side):
     except Exception as e:
         print(f"❌ Error orden Alpaca {side} {sym}: {e}")
         return False
+
+def run_backtest(s, days=200):
+    """
+    Descarga datos históricos de Alpaca y entrena el cerebro del agente.
+    Solo se ejecuta si el agente no tiene historial previo.
+    No ejecuta órdenes reales — solo actualiza scores y patrones.
+    """
+    if not stock_data_client:
+        print("⚠️ Backtest omitido — Alpaca no disponible")
+        return
+
+    print(f"🧠 Iniciando backtest con {days} días de datos históricos...")
+    log(s, f"🧠 Iniciando backtest {days} días...", "think")
+
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    start_str = start.strftime("%Y-%m-%d")
+    end_str = end.strftime("%Y-%m-%d")
+
+    # Descargar barras diarias de acciones
+    historical_prices = {sym: [] for sym in BASE_PRICES}
+    try:
+        req = StockBarsRequest(
+            symbol_or_symbols=STOCK_SYMBOLS,
+            timeframe=TimeFrame.Day,
+            start=start_str,
+            end=end_str
+        )
+        bars = stock_data_client.get_stock_bars(req)
+        for sym in STOCK_SYMBOLS:
+            if sym in bars:
+                historical_prices[sym] = [float(b.close) for b in bars[sym]]
+        print(f"✅ Datos históricos acciones descargados")
+    except Exception as e:
+        print(f"❌ Error descargando histórico acciones: {e}")
+
+    # Descargar barras diarias de crypto
+    try:
+        crypto_req = CryptoBarsRequest(
+            symbol_or_symbols=list(CRYPTO_SYMBOLS.values()),
+            timeframe=TimeFrame.Day,
+            start=start_str,
+            end=end_str
+        )
+        crypto_bars = crypto_data_client.get_crypto_bars(crypto_req)
+        for local_sym, alpaca_sym in CRYPTO_SYMBOLS.items():
+            if alpaca_sym in crypto_bars:
+                historical_prices[local_sym] = [float(b.close) for b in crypto_bars[alpaca_sym]]
+        print(f"✅ Datos históricos crypto descargados")
+    except Exception as e:
+        print(f"❌ Error descargando histórico crypto: {e}")
+
+    # Procesar los datos día por día para entrenar el cerebro
+    # Encontrar la cantidad mínima de días disponibles entre todos los símbolos
+    min_days = min((len(v) for v in historical_prices.values() if v), default=0)
+    if min_days < 2:
+        print("⚠️ Datos históricos insuficientes para backtest")
+        log(s, "⚠️ Datos históricos insuficientes", "warn")
+        return
+
+    bt_wins = 0
+    bt_losses = 0
+    bt_trades = 0
+
+    for i in range(1, min_days):
+        # Actualizar precios del estado con datos históricos del día i
+        for sym in BASE_PRICES:
+            prices_list = historical_prices.get(sym, [])
+            if len(prices_list) > i:
+                prev = prices_list[i - 1]
+                curr = prices_list[i]
+                move = round((curr - prev) / prev, 5) if prev else 0
+                s["prices"][sym] = {"price": curr, "move": move, "trend": move}
+
+        # Simular lógica de trading (sin órdenes reales)
+        T = THRESHOLDS[s["config"]["risk"]]
+        for sym in BASE_PRICES:
+            move = s["prices"][sym]["move"]
+            vol = VOLATILITY[sym]
+            sc = s["scores"][sym]["score"]
+            mult = 1.4  # balanced
+            sig = round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
+
+            pos = s["positions"].get(sym)
+            has_pos = pos and pos.get("qty", 0) > 0
+            price = s["prices"][sym]["price"]
+
+            # Simular compra
+            if sig >= T["buy"] and not has_pos and s["cash"] > price * 0.001:
+                budget = round(s["cash"] * 0.2, 2)
+                qty = round(budget / price, 3)
+                cost = round(qty * price, 2)
+                if qty > 0 and cost <= s["cash"]:
+                    s["cash"] = round(s["cash"] - cost, 2)
+                    s["positions"][sym] = {"qty": qty, "avg_cost": price}
+                    bt_trades += 1
+
+            # Simular venta
+            elif sig <= T["sell"] and has_pos:
+                proceeds = round(pos["qty"] * price, 2)
+                pnl = proceeds - pos["qty"] * pos["avg_cost"]
+                won = pnl > 0
+                ret = (price - pos["avg_cost"]) / pos["avg_cost"]
+                s["cash"] = round(s["cash"] + proceeds, 2)
+                update_brain(s, sym, won, ret)
+                pos["qty"] = 0
+                bt_trades += 1
+                if won:
+                    bt_wins += 1
+                else:
+                    bt_losses += 1
+
+        # Check SL/TP histórico simplificado
+        sl = s["config"]["sl"] / 100
+        tp = s["config"]["tp"] / 100
+        for sym in list(s["positions"].keys()):
+            pos = s["positions"].get(sym)
+            if not pos or pos.get("qty", 0) <= 0:
+                continue
+            cur = s["prices"][sym]["price"]
+            ret = (cur - pos["avg_cost"]) / pos["avg_cost"]
+            if ret <= -sl or ret >= tp:
+                proceeds = round(pos["qty"] * cur, 2)
+                pnl = proceeds - pos["qty"] * pos["avg_cost"]
+                s["cash"] = round(s["cash"] + proceeds, 2)
+                update_brain(s, sym, pnl > 0, ret)
+                pos["qty"] = 0
+                bt_trades += 1
+                if pnl > 0:
+                    bt_wins += 1
+                else:
+                    bt_losses += 1
+
+    # Cerrar posiciones abiertas al finalizar backtest
+    for sym in list(s["positions"].keys()):
+        pos = s["positions"].get(sym)
+        if pos and pos.get("qty", 0) > 0:
+            pos["qty"] = 0
+
+    # Resetear cash al valor original — el backtest solo entrena, no cambia capital
+    s["cash"] = s["start_cap"]
+    s["wins"] = 0
+    s["losses"] = 0
+    s["positions"] = {}
+    s["backtest_done"] = True
+    s["backtest_summary"] = {
+        "dias": min_days,
+        "trades_simulados": bt_trades,
+        "wins": bt_wins,
+        "losses": bt_losses,
+        "wr": round(bt_wins / bt_trades * 100) if bt_trades > 0 else 0
+    }
+
+    wr = round(bt_wins / bt_trades * 100) if bt_trades > 0 else 0
+    print(f"✅ Backtest completado: {min_days} días · {bt_trades} trades · WR {wr}%")
+    log(s, f"✅ Backtest {min_days} días completado · {bt_trades} trades · WR {wr}%", "think")
+    save_state(s)
+
 
 # ---- DB ----
 
@@ -366,6 +527,15 @@ state["running"] = False
 if ALPACA_API_KEY and ALPACA_SECRET_KEY:
     state["mode"] = "beta"
 
+# Auto-backtest: solo si no tiene historial previo
+if stock_data_client and not state.get("backtest_done") and len(state.get("memory", [])) == 0:
+    print("🧠 Sin historial detectado — lanzando backtest automático en segundo plano...")
+    bt_thread = threading.Thread(target=run_backtest, args=(state, 200), daemon=True)
+    bt_thread.start()
+else:
+    if state.get("backtest_done"):
+        print("✅ Backtest previo detectado — omitiendo")
+
 @app.route("/")
 def index():
     return jsonify({
@@ -437,6 +607,15 @@ def reset():
 @app.route("/history")
 def history():
     return jsonify({"history": state["history"][:100]})
+
+@app.route("/backtest/status")
+def backtest_status():
+    return jsonify({
+        "done": state.get("backtest_done", False),
+        "summary": state.get("backtest_summary", None),
+        "memory_size": len(state.get("memory", [])),
+        "patterns": state.get("patterns", [])
+    })
 
 @app.route("/alpaca/status")
 def alpaca_status():
