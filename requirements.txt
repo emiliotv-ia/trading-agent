@@ -4,3 +4,4 @@ psycopg2-binary
 alpaca-py
 gunicorn
 pytz
+pandas
