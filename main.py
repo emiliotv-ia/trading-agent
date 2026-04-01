@@ -124,10 +124,17 @@ def run_backtest(s, days=200):
             start=start_str,
             end=end_str
         )
-        bars = stock_data_client.get_stock_bars(req)
-        for sym in STOCK_SYMBOLS:
-            if sym in bars:
-                historical_prices[sym] = [float(b.close) for b in bars[sym]]
+        bars_response = stock_data_client.get_stock_bars(req)
+        bars_df = bars_response.df.reset_index() if hasattr(bars_response, 'df') else None
+        if bars_df is not None and not bars_df.empty:
+            for sym in STOCK_SYMBOLS:
+                if "symbol" in bars_df.columns:
+                    sym_data = bars_df[bars_df["symbol"] == sym]["close"].tolist()
+                else:
+                    sym_data = bars_df["close"].tolist()
+                if sym_data:
+                    historical_prices[sym] = [float(p) for p in sym_data]
+                    print(f"  {sym}: {len(historical_prices[sym])} dias")
         print(f"✅ Datos históricos acciones descargados")
     except Exception as e:
         print(f"❌ Error descargando histórico acciones: {e}")
@@ -140,10 +147,17 @@ def run_backtest(s, days=200):
             start=start_str,
             end=end_str
         )
-        crypto_bars = crypto_data_client.get_crypto_bars(crypto_req)
-        for local_sym, alpaca_sym in CRYPTO_SYMBOLS.items():
-            if alpaca_sym in crypto_bars:
-                historical_prices[local_sym] = [float(b.close) for b in crypto_bars[alpaca_sym]]
+        crypto_response = crypto_data_client.get_crypto_bars(crypto_req)
+        crypto_df = crypto_response.df.reset_index() if hasattr(crypto_response, 'df') else None
+        if crypto_df is not None and not crypto_df.empty:
+            for local_sym, alpaca_sym in CRYPTO_SYMBOLS.items():
+                if "symbol" in crypto_df.columns:
+                    sym_data = crypto_df[crypto_df["symbol"] == alpaca_sym]["close"].tolist()
+                else:
+                    sym_data = crypto_df["close"].tolist()
+                if sym_data:
+                    historical_prices[local_sym] = [float(p) for p in sym_data]
+                    print(f"  {local_sym}: {len(historical_prices[local_sym])} dias")
         print(f"✅ Datos históricos crypto descargados")
     except Exception as e:
         print(f"❌ Error descargando histórico crypto: {e}")
