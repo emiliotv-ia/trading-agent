@@ -67,9 +67,34 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
 .hist-stat{font-size:12px;color:#555;}
 .hist-stat span{font-weight:600;color:#111;}
 @media(max-width:600px){.mg{grid-template-columns:repeat(2,1fr);}}
+
+/* LOGIN */
+#login-screen{position:fixed;inset:0;background:#f5f5f5;display:flex;align-items:center;justify-content:center;z-index:9999;}
+.login-box{background:#fff;border:1px solid #e0e0e0;border-radius:14px;padding:36px 32px;width:100%;max-width:340px;box-shadow:0 4px 24px rgba(0,0,0,.07);}
+.login-box h2{font-size:17px;font-weight:600;margin-bottom:6px;}
+.login-box p{font-size:12px;color:#888;margin-bottom:24px;}
+.login-box input{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:12px;outline:none;}
+.login-box input:focus{border-color:#1D9E75;}
+.login-box button{width:100%;padding:11px;background:#1D9E75;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500;}
+.login-box button:hover{opacity:.88;}
+#login-error{font-size:12px;color:#A32D2D;margin-top:8px;display:none;}
 </style>
 </head>
 <body>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+  <div class="login-box">
+    <h2>TradingAgent AI</h2>
+    <p>Ingresá la contraseña para acceder al dashboard.</p>
+    <input type="password" id="pwd-input" placeholder="Contraseña" onkeydown="if(event.key==='Enter')checkLogin()">
+    <button onclick="checkLogin()">Entrar</button>
+    <div id="login-error">Contraseña incorrecta.</div>
+  </div>
+</div>
+
+<!-- DASHBOARD (oculto hasta login) -->
+<div id="app" style="display:none;">
 
 <div class="header">
   <div style="display:flex;align-items:center;gap:12px;">
@@ -212,7 +237,35 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
   </div>
 </div>
 
+</div><!-- fin #app -->
+
 <script>
+// -------------------------------------------------------
+// LOGIN — cambiá esta contraseña por la que quieras
+// -------------------------------------------------------
+const PASSWORD = 'trading2026';
+
+function checkLogin(){
+  const val = document.getElementById('pwd-input').value;
+  if(val === PASSWORD){
+    sessionStorage.setItem('auth','ok');
+    document.getElementById('login-screen').style.display='none';
+    document.getElementById('app').style.display='block';
+    fetchState();
+  } else {
+    document.getElementById('login-error').style.display='block';
+    document.getElementById('pwd-input').value='';
+    document.getElementById('pwd-input').focus();
+  }
+}
+
+// Si ya autenticó en esta sesión, saltar el login
+if(sessionStorage.getItem('auth')==='ok'){
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('app').style.display='block';
+}
+// -------------------------------------------------------
+
 const SECTOR={NVDA:'Chips IA',MSFT:'Cloud/IA',META:'IA Consumo',GOOGL:'IA/Search',AMZN:'Cloud',PLTR:'Data IA',ARKK:'ETF Tech',QQQ:'ETF NASDAQ',BTC:'Crypto',ETH:'Crypto'};
 let agentRunning=false;
 let lastData=null;
@@ -501,9 +554,12 @@ function showTab(name,el){
   if(el) el.classList.add('active');
 }
 
-fetchState();
-setInterval(fetchState,10000);
-setInterval(()=>fetch('/').catch(()=>{}),600000);
+// Solo arranca fetchState si ya está autenticado
+if(sessionStorage.getItem('auth')==='ok'){
+  fetchState();
+  setInterval(fetchState,10000);
+  setInterval(()=>fetch('/').catch(()=>{}),600000);
+}
 </script>
 </body>
 </html>
