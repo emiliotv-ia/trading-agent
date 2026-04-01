@@ -469,7 +469,7 @@ def run_cycle(s):
         sc = s["scores"][sym]["score"]
         risk = s["config"]["risk"]
         mult = 2.5 if risk=="aggressive" else 0.7 if risk=="conservative" else 1.4
-        sig = round((move/vol)*mult + ((sc-50)/50)*0.4 + (random.random()-0.5)*0.2, 3)
+        sig = round((move/vol)*mult + ((sc-50)/50)*0.4*0.2, 3)
         pos = s["positions"].get(sym)
         has_pos = pos and pos.get("qty", 0) > 0
         price = gp(s, sym)
