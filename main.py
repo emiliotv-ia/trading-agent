@@ -326,7 +326,7 @@ def default_state():
         "price_history": {s: [] for s in BASE_PRICES},  # historial para medias móviles
         "patterns": [], "memory": [], "wins": 0, "losses": 0, "cycle": 0,
         "running": False, "last_cycle_time": 0,
-        "config": {"freq": 60, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"},
+        "config": {"freq": 300, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"},
         "mode": "beta"
     }
 
@@ -406,8 +406,8 @@ def update_prices(s):
             ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
             for sym2 in BASE_PRICES:
                 ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
-                if len(ph[sym2]) > 30:
-                    ph[sym2] = ph[sym2][-30:]
+                if len(ph[sym2]) > 100:
+                    ph[sym2] = ph[sym2][-100:]
 
             return True
         else:
@@ -418,8 +418,8 @@ def update_prices(s):
             ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
             for sym2 in BASE_PRICES:
                 ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
-                if len(ph[sym2]) > 30:
-                    ph[sym2] = ph[sym2][-30:]
+                if len(ph[sym2]) > 100:
+                    ph[sym2] = ph[sym2][-100:]
 
             return False
     else:
@@ -429,8 +429,8 @@ def update_prices(s):
         ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
         for sym2 in BASE_PRICES:
             ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
-            if len(ph[sym2]) > 30:
-                ph[sym2] = ph[sym2][-30:]
+            if len(ph[sym2]) > 100:
+                ph[sym2] = ph[sym2][-100:]
 
         return False
 
