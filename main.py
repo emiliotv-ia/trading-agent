@@ -779,11 +779,26 @@ def config():
 @app.route("/reset", methods=["POST"])
 def reset():
     global state
+    # Cerrar todas las posiciones abiertas en Alpaca antes de limpiar el estado
+    closed = []
+    errors = []
+    if trading_client:
+        for sym, pos in state.get("positions", {}).items():
+            if pos and pos.get("qty", 0) > 0:
+                ok = place_alpaca_order(sym, pos["qty"], "sell")
+                if ok:
+                    closed.append(sym)
+                else:
+                    errors.append(sym)
+        if closed:
+            print(f"🔄 Reset: posiciones cerradas en Alpaca: {closed}")
+        if errors:
+            print(f"⚠️ Reset: no se pudieron cerrar: {errors}")
     state = default_state()
     if ALPACA_API_KEY and ALPACA_SECRET_KEY:
         state["mode"] = "beta"
     save_state(state)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "closed": closed, "errors": errors})
 
 @app.route("/history")
 def history():
