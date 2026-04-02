@@ -305,10 +305,16 @@ SECTORS = {
     "GOOGL": "IA/Search", "AMZN": "Cloud", "PLTR": "Data IA",
     "ARKK": "ETF Tech", "QQQ": "ETF NASDAQ", "BTC": "Crypto", "ETH": "Crypto"
 }
+
+# -------------------------------------------------------
+# THRESHOLDS RECALIBRADOS para señal de medias móviles
+# La señal de cruce produce valores más grandes que la
+# señal anterior, por eso los umbrales son más exigentes
+# -------------------------------------------------------
 THRESHOLDS = {
-    "conservative": {"buy": 0.8, "sell": -0.6},
-    "balanced": {"buy": 0.4, "sell": -0.3},
-    "aggressive": {"buy": 0.15, "sell": -0.1}
+    "conservative": {"buy": 1.5,  "sell": -1.2},
+    "balanced":     {"buy": 0.8,  "sell": -0.6},
+    "aggressive":   {"buy": 0.35, "sell": -0.25}
 }
 
 def default_state():
@@ -317,6 +323,7 @@ def default_state():
         "positions": {}, "history": [], "decisions": [], "log": [],
         "scores": {s: {"score": 50, "trades": 0, "wins": 0, "last": "hold"} for s in BASE_PRICES},
         "prices": {s: {"price": p, "move": 0, "trend": 0} for s, p in BASE_PRICES.items()},
+        "price_history": {s: [] for s in BASE_PRICES},  # historial para medias móviles
         "patterns": [], "memory": [], "wins": 0, "losses": 0, "cycle": 0,
         "running": False, "last_cycle_time": 0,
         "config": {"freq": 60, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"},
@@ -332,7 +339,11 @@ def load_state():
         cur.close()
         conn.close()
         if row:
-            return row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            # Migración: agregar price_history si no existe en estado guardado
+            if "price_history" not in data:
+                data["price_history"] = {s: [] for s in BASE_PRICES}
+            return data
     except Exception as e:
         print(f"Load state error: {e}")
     return default_state()
@@ -390,13 +401,37 @@ def update_prices(s):
                     move = (random.random() - 0.5) * 2 * vol
                     np_ = round(prev * (1 + move), 2)
                     s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(move, 5)}
+
+            # Guardar historial de precios para medias móviles
+            ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
+            for sym2 in BASE_PRICES:
+                ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
+                if len(ph[sym2]) > 30:
+                    ph[sym2] = ph[sym2][-30:]
+
             return True
         else:
             log(s, "⚠️ Sin precios Alpaca — usando simulación", "warn")
             simulate_prices(s)
+
+            # Guardar historial incluso en simulación
+            ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
+            for sym2 in BASE_PRICES:
+                ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
+                if len(ph[sym2]) > 30:
+                    ph[sym2] = ph[sym2][-30:]
+
             return False
     else:
         simulate_prices(s)
+
+        # Guardar historial en modo alpha
+        ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
+        for sym2 in BASE_PRICES:
+            ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
+            if len(ph[sym2]) > 30:
+                ph[sym2] = ph[sym2][-30:]
+
         return False
 
 def gp(s, sym):
@@ -442,6 +477,29 @@ def check_sl_tp(s):
         log(s, f"{reason.upper()} {sym} · ret {round(ret*100,2)}% · P&L ${pnl}", "buy" if pnl>0 else "sell")
         pos["qty"] = 0
 
+# -------------------------------------------------------
+# NUEVA SEÑAL — basada en cruce de medias móviles
+# MA5 vs MA20 sobre historial de precios reales
+# Durante los primeros 20 ciclos usa la señal original
+# -------------------------------------------------------
+def calc_signal(s, sym, mult):
+    hist = s.get("price_history", {}).get(sym, [])
+    move = s["prices"][sym]["move"]
+    vol = VOLATILITY[sym]
+    sc = s["scores"][sym]["score"]
+
+    if len(hist) < 20:
+        # Sin historial suficiente — señal original mientras acumula datos
+        return round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
+
+    ma5  = sum(hist[-5:])  / 5
+    ma20 = sum(hist[-20:]) / 20
+
+    # Cruce de medias normalizado por volatilidad del activo
+    cross = (ma5 - ma20) / ma20
+    sig = round((cross / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
+    return sig
+
 def run_cycle(s):
     now = time.time()
     freq = s["config"].get("freq", 60)
@@ -453,6 +511,14 @@ def run_cycle(s):
 
     using_real = update_prices(s)
     source = "📡 Alpaca" if using_real else "🎲 Simulado"
+
+    # Indicar si ya está usando medias móviles o aún acumulando
+    hist_len = len(s.get("price_history", {}).get("NVDA", []))
+    if hist_len < 20:
+        source += f" · acumulando historial ({hist_len}/20)"
+    else:
+        source += " · MA activa"
+
     log(s, f"Ciclo #{s['cycle']} · Precios: {source}", "think")
 
     check_sl_tp(s)
@@ -462,14 +528,13 @@ def run_cycle(s):
     bought = sold = held = 0
 
     for sym in BASE_PRICES:
-        move = s["prices"][sym]["move"]
         vol = VOLATILITY[sym]
         sc = s["scores"][sym]["score"]
         risk = s["config"]["risk"]
         mult = 2.5 if risk=="aggressive" else 0.7 if risk=="conservative" else 1.4
 
-        # Señal limpia — sin ruido aleatorio
-        sig = round((move/vol)*mult + ((sc-50)/50)*0.4, 3)
+        # Nueva señal basada en medias móviles
+        sig = calc_signal(s, sym, mult)
 
         pos = s["positions"].get(sym)
         has_pos = pos and pos.get("qty", 0) > 0
@@ -573,11 +638,12 @@ def dashboard():
 
 @app.route("/state")
 def get_state():
-    if state["running"]:
-        run_cycle(state)
+    # run_cycle removido de acá — el background loop ya se encarga.
+    # Llamarlo acá generaba race conditions con el loop de fondo.
     total = state["cash"] + sum(pos["qty"]*gp(state,sym) for sym,pos in state["positions"].items() if pos.get("qty",0)>0)
     pnl = round(total - state["start_cap"], 2)
     wr = round(state["wins"]/(state["wins"]+state["losses"])*100) if (state["wins"]+state["losses"])>0 else 0
+    hist_len = len(state.get("price_history", {}).get("NVDA", []))
     return jsonify({
         "running": state["running"], "cycle": state["cycle"],
         "cash": round(state["cash"],2), "total": round(total,2),
@@ -589,7 +655,9 @@ def get_state():
         "patterns": state["patterns"], "config": state["config"],
         "history_count": len(state["history"]),
         "mode": state.get("mode", "alpha"),
-        "alpaca_connected": trading_client is not None
+        "alpaca_connected": trading_client is not None,
+        "ma_ready": hist_len >= 20,      # indica si las medias móviles ya están activas
+        "ma_progress": f"{hist_len}/20"  # progreso de acumulación de historial
     })
 
 @app.route("/start", methods=["POST"])
