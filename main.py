@@ -49,20 +49,51 @@ def init_alpaca():
 CRYPTO_SYMBOLS = {"BTC": "BTC/USD", "ETH": "ETH/USD"}
 STOCK_SYMBOLS = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ"]
 
-def get_real_prices():
+
+
+def is_market_open():
+    """Devuelve True si el mercado de acciones NYSE/NASDAQ está abierto ahora."""
+    import pytz
+    et = pytz.timezone("America/New_York")
+    now_et = datetime.now(et)
+    if now_et.weekday() >= 5:  # sábado=5, domingo=6
+        return False
+    market_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return market_open <= now_et < market_close
+
+def get_stock_bar_prices():
+    """
+    Cierre de la última vela de 5min para cada acción.
+    Solo llamar durante horario de mercado.
+    """
     prices = {}
     try:
-        req = StockLatestQuoteRequest(symbol_or_symbols=STOCK_SYMBOLS)
-        quotes = stock_data_client.get_stock_latest_quote(req)
-        for sym in STOCK_SYMBOLS:
-            if sym in quotes:
-                q = quotes[sym]
-                mid = round((q.ask_price + q.bid_price) / 2, 2) if q.ask_price and q.bid_price else q.ask_price or q.bid_price
-                if mid and mid > 0:
-                    prices[sym] = mid
+        end   = datetime.utcnow()
+        start = end - timedelta(minutes=15)  # ventana amplia para asegurar al menos 1 vela
+        req = StockBarsRequest(
+            symbol_or_symbols=STOCK_SYMBOLS,
+            timeframe=TimeFrame.Minute5,
+            start=start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end=end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            feed="iex"
+        )
+        bars = stock_data_client.get_stock_bars(req)
+        df = bars.df.reset_index() if hasattr(bars, "df") else None
+        if df is not None and not df.empty:
+            for sym in STOCK_SYMBOLS:
+                sym_df = df[df["symbol"] == sym] if "symbol" in df.columns else df
+                if not sym_df.empty:
+                    close = float(sym_df.iloc[-1]["close"])
+                    if close > 0:
+                        prices[sym] = round(close, 2)
     except Exception as e:
-        print(f"Error precios acciones: {e}")
+        print(f"Error velas acciones 5min: {e}")
+    return prices
 
+def get_crypto_prices():
+    """Último quote de crypto (24/7)."""
+    prices = {}
     try:
         crypto_req = CryptoLatestQuoteRequest(symbol_or_symbols=list(CRYPTO_SYMBOLS.values()))
         crypto_quotes = crypto_data_client.get_crypto_latest_quote(crypto_req)
@@ -74,8 +105,7 @@ def get_real_prices():
                     prices[local_sym] = mid
     except Exception as e:
         print(f"Error precios crypto: {e}")
-
-    return prices if prices else None
+    return prices
 
 def place_alpaca_order(sym, qty, side):
     try:
@@ -384,55 +414,71 @@ def simulate_prices(s):
         else: np_ = round(np_, 2)
         s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(trend, 5)}
 
+def _append_price_history(s):
+    """Guarda el precio actual de cada símbolo en price_history (max 100 puntos)."""
+    ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
+    for sym in BASE_PRICES:
+        ph.setdefault(sym, []).append(s["prices"][sym]["price"])
+        if len(ph[sym]) > 100:
+            ph[sym] = ph[sym][-100:]
+
 def update_prices(s):
+    """
+    Actualiza precios y retorna (usando_real, mercado_abierto).
+    - Acciones: velas de 5min reales si mercado abierto, precio estático si cerrado.
+    - Crypto: quote en tiempo real siempre (24/7).
+    - Modo alpha: simulación completa.
+    """
     mode = s.get("mode", "alpha")
-    if mode == "beta" and trading_client:
-        real = get_real_prices()
-        if real:
-            for sym, new_price in real.items():
+
+    if mode != "beta" or not trading_client:
+        simulate_prices(s)
+        _append_price_history(s)
+        return False, False
+
+    market_open = is_market_open()
+    got_real = False
+
+    # --- CRYPTO siempre ---
+    crypto = get_crypto_prices()
+    for local_sym, new_price in crypto.items():
+        prev = s["prices"][local_sym]["price"]
+        move = round((new_price - prev) / prev, 5) if prev else 0
+        s["prices"][local_sym] = {"price": new_price, "move": move, "trend": move}
+    if crypto:
+        got_real = True
+
+    # --- ACCIONES solo si mercado abierto ---
+    if market_open:
+        stock_prices = get_stock_bar_prices()
+        if stock_prices:
+            for sym, new_price in stock_prices.items():
                 prev = s["prices"][sym]["price"]
                 move = round((new_price - prev) / prev, 5) if prev else 0
                 s["prices"][sym] = {"price": new_price, "move": move, "trend": move}
-            missing = [s2 for s2 in BASE_PRICES if s2 not in real]
-            if missing:
-                for sym in missing:
+            # Simular los que no vinieron (raro, pero por si acaso)
+            for sym in STOCK_SYMBOLS:
+                if sym not in stock_prices:
                     vol = VOLATILITY[sym]
                     prev = s["prices"][sym]["price"]
                     move = (random.random() - 0.5) * 2 * vol
-                    np_ = round(prev * (1 + move), 2)
-                    s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(move, 5)}
-
-            # Guardar historial de precios para medias móviles
-            ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
-            for sym2 in BASE_PRICES:
-                ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
-                if len(ph[sym2]) > 100:
-                    ph[sym2] = ph[sym2][-100:]
-
-            return True
+                    s["prices"][sym] = {"price": round(prev * (1 + move), 2),
+                                        "move": round(move, 5), "trend": round(move, 5)}
+            got_real = True
         else:
-            log(s, "⚠️ Sin precios Alpaca — usando simulación", "warn")
-            simulate_prices(s)
+            # Mercado abierto pero sin datos — simular acciones
+            for sym in STOCK_SYMBOLS:
+                vol = VOLATILITY[sym]
+                prev = s["prices"][sym]["price"]
+                move = (random.random() - 0.5) * 2 * vol
+                s["prices"][sym] = {"price": round(prev * (1 + move), 2),
+                                    "move": round(move, 5), "trend": round(move, 5)}
 
-            # Guardar historial incluso en simulación
-            ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
-            for sym2 in BASE_PRICES:
-                ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
-                if len(ph[sym2]) > 100:
-                    ph[sym2] = ph[sym2][-100:]
+        # Solo agregamos al historial cuando el mercado está abierto.
+        # Mercado cerrado → historial pausado → MAs se congelan pero son precisas.
+        _append_price_history(s)
 
-            return False
-    else:
-        simulate_prices(s)
-
-        # Guardar historial en modo alpha
-        ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
-        for sym2 in BASE_PRICES:
-            ph.setdefault(sym2, []).append(s["prices"][sym2]["price"])
-            if len(ph[sym2]) > 100:
-                ph[sym2] = ph[sym2][-100:]
-
-        return False
+    return got_real, market_open
 
 def gp(s, sym):
     return s["prices"][sym]["price"]
@@ -502,24 +548,68 @@ def calc_signal(s, sym, mult):
 
 def run_cycle(s):
     now = time.time()
-    freq = s["config"].get("freq", 60)
+    freq = s["config"].get("freq", 300)
     last = s.get("last_cycle_time", 0)
     if now - last < freq:
         return
     s["last_cycle_time"] = now
     s["cycle"] += 1
 
-    using_real = update_prices(s)
-    source = "📡 Alpaca" if using_real else "🎲 Simulado"
+    mode = s.get("mode", "alpha")
+    using_real, market_open = update_prices(s)
 
-    # Indicar si ya está usando medias móviles o aún acumulando
+    # Mercado cerrado en modo beta — crypto sigue, acciones pausadas
+    if mode == "beta" and not market_open:
+        hist_len = len(s.get("price_history", {}).get("NVDA", []))
+        log(s, f"Ciclo #{s['cycle']} · 🔒 Mercado cerrado · historial pausado ({hist_len} pts) · solo crypto activa", "think")
+        # Operar crypto igual (BTC/ETH no tienen horario)
+        check_sl_tp(s)
+        T = THRESHOLDS[s["config"]["risk"]]
+        total = s["cash"] + sum(pos["qty"]*gp(s,sym) for sym,pos in s["positions"].items() if pos.get("qty",0)>0)
+        budget = round(total * s["config"]["sz"] / 100, 2)
+        for sym in ["BTC", "ETH"]:
+            risk = s["config"]["risk"]
+            mult = 2.5 if risk=="aggressive" else 0.7 if risk=="conservative" else 1.4
+            sig = calc_signal(s, sym, mult)
+            pos = s["positions"].get(sym)
+            has_pos = pos and pos.get("qty", 0) > 0
+            price = gp(s, sym)
+            s["scores"][sym]["last"] = "compra" if sig>=T["buy"] else "venta" if sig<=T["sell"] else "hold"
+            if sig >= T["buy"] and not has_pos and s["cash"] > price * 0.001:
+                spend = min(budget, s["cash"] * 0.9)
+                qty = round(spend/price, 6)
+                cost = round(qty * price, 2)
+                if qty > 0 and cost <= s["cash"] + 0.01:
+                    if trading_client:
+                        place_alpaca_order(sym, qty, "buy")
+                    s["cash"] = round(s["cash"] - cost, 2)
+                    s["positions"][sym] = {"qty": qty, "avg_cost": price}
+                    s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Compra", "qty": qty, "price": price, "pnl": None})
+                    s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "COMPRA", "price": price, "detail": f"señal {sig}"})
+                    log(s, f"COMPRA {qty} {sym} a ${price}", "buy")
+            elif sig <= T["sell"] and has_pos:
+                proceeds = round(pos["qty"]*price, 2)
+                pnl = round(proceeds - pos["qty"]*pos["avg_cost"], 2)
+                if trading_client:
+                    place_alpaca_order(sym, pos["qty"], "sell")
+                s["cash"] = round(s["cash"] + proceeds, 2)
+                update_brain(s, sym, pnl>0, (price-pos["avg_cost"])/pos["avg_cost"])
+                s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Venta", "qty": pos["qty"], "price": price, "pnl": pnl})
+                s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "VENTA", "price": price,
+                                           "detail": f"señal {sig} · P&L ${pnl}", "won": pnl>0})
+                log(s, f"VENTA {pos['qty']} {sym} a ${price} · P&L ${pnl}", "buy" if pnl>0 else "sell")
+                pos["qty"] = 0
+        save_state(s)
+        return
+
+    source = "📡 Alpaca velas 5min" if using_real else "🎲 Simulado"
     hist_len = len(s.get("price_history", {}).get("NVDA", []))
     if hist_len < 20:
         source += f" · acumulando historial ({hist_len}/20)"
     else:
-        source += " · MA activa"
+        source += " · MA5/MA20 activa"
 
-    log(s, f"Ciclo #{s['cycle']} · Precios: {source}", "think")
+    log(s, f"Ciclo #{s['cycle']} · {source}", "think")
 
     check_sl_tp(s)
     T = THRESHOLDS[s["config"]["risk"]]
@@ -656,8 +746,9 @@ def get_state():
         "history_count": len(state["history"]),
         "mode": state.get("mode", "alpha"),
         "alpaca_connected": trading_client is not None,
-        "ma_ready": hist_len >= 20,      # indica si las medias móviles ya están activas
-        "ma_progress": f"{hist_len}/20"  # progreso de acumulación de historial
+        "ma_ready": hist_len >= 20,
+        "ma_progress": f"{hist_len}/20",
+        "market_open": is_market_open() if state.get("mode") == "beta" else None
     })
 
 @app.route("/start", methods=["POST"])
