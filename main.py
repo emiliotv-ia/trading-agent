@@ -46,8 +46,8 @@ def init_alpaca():
         print(f"❌ Error conectando Alpaca: {e}")
 
 # Mapeo símbolos crypto para Alpaca
-CRYPTO_SYMBOLS = {"BTC": "BTC/USD", "ETH": "ETH/USD"}
-STOCK_SYMBOLS = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ"]
+CRYPTO_SYMBOLS = {}
+STOCK_SYMBOLS = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ", "MU", "TSM", "CEG", "GEV"]
 
 
 
@@ -323,17 +323,18 @@ def init_db():
 BASE_PRICES = {
     "NVDA": 875, "MSFT": 380, "META": 515, "GOOGL": 168,
     "AMZN": 192, "PLTR": 24, "ARKK": 48, "QQQ": 447,
-    "BTC": 85000, "ETH": 1900
+    "MU": 90, "TSM": 160, "CEG": 250, "GEV": 360
 }
 VOLATILITY = {
     "NVDA": 0.022, "MSFT": 0.014, "META": 0.020, "GOOGL": 0.015,
     "AMZN": 0.017, "PLTR": 0.035, "ARKK": 0.025, "QQQ": 0.013,
-    "BTC": 0.045, "ETH": 0.050
+    "MU": 0.030, "TSM": 0.022, "CEG": 0.025, "GEV": 0.028
 }
 SECTORS = {
     "NVDA": "Chips IA", "MSFT": "Cloud/IA", "META": "IA Consumo",
     "GOOGL": "IA/Search", "AMZN": "Cloud", "PLTR": "Data IA",
-    "ARKK": "ETF Tech", "QQQ": "ETF NASDAQ", "BTC": "Crypto", "ETH": "Crypto"
+    "ARKK": "ETF Tech", "QQQ": "ETF NASDAQ", "MU": "Chips/Memoria", "TSM": "Chips IA",
+    "CEG": "Energía", "GEV": "Energía"
 }
 
 # -------------------------------------------------------
@@ -409,9 +410,7 @@ def simulate_prices(s):
         move = (trend + (random.random() - 0.5) * 2) * vol
         prev = s["prices"][sym]["price"]
         np_ = prev * (1 + move)
-        if sym == "BTC": np_ = round(np_)
-        elif sym == "ETH": np_ = round(np_, 1)
-        else: np_ = round(np_, 2)
+        np_ = round(np_, 2)
         s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(trend, 5)}
 
 def _append_price_history(s):
@@ -558,47 +557,11 @@ def run_cycle(s):
     mode = s.get("mode", "alpha")
     using_real, market_open = update_prices(s)
 
-    # Mercado cerrado en modo beta — crypto sigue, acciones pausadas
+    # Mercado cerrado en modo beta — acciones pausadas
     if mode == "beta" and not market_open:
         hist_len = len(s.get("price_history", {}).get("NVDA", []))
-        log(s, f"Ciclo #{s['cycle']} · 🔒 Mercado cerrado · historial pausado ({hist_len} pts) · solo crypto activa", "think")
-        # Operar crypto igual (BTC/ETH no tienen horario)
+        log(s, f"Ciclo #{s['cycle']} · 🔒 Mercado cerrado · historial pausado ({hist_len} pts)", "think")
         check_sl_tp(s)
-        T = THRESHOLDS[s["config"]["risk"]]
-        total = s["cash"] + sum(pos["qty"]*gp(s,sym) for sym,pos in s["positions"].items() if pos.get("qty",0)>0)
-        budget = round(total * s["config"]["sz"] / 100, 2)
-        for sym in ["BTC", "ETH"]:
-            risk = s["config"]["risk"]
-            mult = 2.5 if risk=="aggressive" else 0.7 if risk=="conservative" else 1.4
-            sig = calc_signal(s, sym, mult)
-            pos = s["positions"].get(sym)
-            has_pos = pos and pos.get("qty", 0) > 0
-            price = gp(s, sym)
-            s["scores"][sym]["last"] = "compra" if sig>=T["buy"] else "venta" if sig<=T["sell"] else "hold"
-            if sig >= T["buy"] and not has_pos and s["cash"] > price * 0.001:
-                spend = min(budget, s["cash"] * 0.9)
-                qty = round(spend/price, 6)
-                cost = round(qty * price, 2)
-                if qty > 0 and cost <= s["cash"] + 0.01:
-                    if trading_client:
-                        place_alpaca_order(sym, qty, "buy")
-                    s["cash"] = round(s["cash"] - cost, 2)
-                    s["positions"][sym] = {"qty": qty, "avg_cost": price}
-                    s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Compra", "qty": qty, "price": price, "pnl": None})
-                    s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "COMPRA", "price": price, "detail": f"señal {sig}"})
-                    log(s, f"COMPRA {qty} {sym} a ${price}", "buy")
-            elif sig <= T["sell"] and has_pos:
-                proceeds = round(pos["qty"]*price, 2)
-                pnl = round(proceeds - pos["qty"]*pos["avg_cost"], 2)
-                if trading_client:
-                    place_alpaca_order(sym, pos["qty"], "sell")
-                s["cash"] = round(s["cash"] + proceeds, 2)
-                update_brain(s, sym, pnl>0, (price-pos["avg_cost"])/pos["avg_cost"])
-                s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Venta", "qty": pos["qty"], "price": price, "pnl": pnl})
-                s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "VENTA", "price": price,
-                                           "detail": f"señal {sig} · P&L ${pnl}", "won": pnl>0})
-                log(s, f"VENTA {pos['qty']} {sym} a ${price} · P&L ${pnl}", "buy" if pnl>0 else "sell")
-                pos["qty"] = 0
         save_state(s)
         return
 
