@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import requests
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -21,14 +22,16 @@ import time
 app = Flask(__name__)
 CORS(app)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY")
+DATABASE_URL      = os.environ.get("DATABASE_URL")
+ALPACA_API_KEY    = os.environ.get("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY")
-ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+ALPACA_BASE_URL   = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+FINNHUB_API_KEY   = os.environ.get("FINNHUB_API_KEY",  "d7arc29r01qtpbh9igcgd7arc29r01qtpbh9igd0")
+NEWS_API_KEY      = os.environ.get("NEWS_API_KEY",      "0a7437acf2664cf488d2287b22e6721d")
 
 # Clientes Alpaca
-trading_client = None
-stock_data_client = None
+trading_client     = None
+stock_data_client  = None
 crypto_data_client = None
 
 def init_alpaca():
@@ -36,8 +39,8 @@ def init_alpaca():
     try:
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             paper = "paper" in ALPACA_BASE_URL
-            trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=paper)
-            stock_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            trading_client     = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=paper)
+            stock_data_client  = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
             crypto_data_client = CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
             print("✅ Alpaca conectado correctamente")
         else:
@@ -45,32 +48,289 @@ def init_alpaca():
     except Exception as e:
         print(f"❌ Error conectando Alpaca: {e}")
 
-# Mapeo símbolos crypto para Alpaca
 CRYPTO_SYMBOLS = {}
-STOCK_SYMBOLS = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ", "MU", "TSM", "CEG", "GEV"]
+STOCK_SYMBOLS  = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ", "MU", "TSM", "CEG", "GEV"]
+
+# -------------------------------------------------------
+# SENTIMENT — estado global cacheado
+# Se actualiza cada 15 min en un thread separado
+# -------------------------------------------------------
+# Estructura por ticker:
+# {
+#   "NVDA": {
+#       "score": 0.45,          # -1.0 a +1.0
+#       "label": "bullish",     # bullish / neutral / bearish
+#       "sources": {
+#           "finnhub": 0.6,
+#           "newsapi": 0.3,
+#           "alpaca":  0.4
+#       },
+#       "news": [               # últimas 5 noticias
+#           {"title": "...", "source": "finnhub", "url": "...", "ts": "..."},
+#       ],
+#       "updated": "14:32:00"
+#   }
+# }
+sentiment_cache = {}
+sentiment_lock  = threading.Lock()
+
+SENTIMENT_UPDATE_INTERVAL = 900  # 15 minutos
 
 
+# ---- Helpers de sentiment ----
+
+def _label(score):
+    if score >= 0.15:  return "bullish"
+    if score <= -0.15: return "bearish"
+    return "neutral"
+
+def _finnhub_sentiment(sym):
+    """
+    Finnhub Company News Sentiment.
+    Devuelve score entre -1 y +1, y lista de noticias recientes.
+    """
+    try:
+        # Sentiment score agregado
+        url_sent = f"https://finnhub.io/api/v1/news-sentiment?symbol={sym}&token={FINNHUB_API_KEY}"
+        r = requests.get(url_sent, timeout=8)
+        data = r.json()
+        # companyNewsScore va de 0 a 1 donde >0.5 es positivo
+        raw = data.get("companyNewsScore", None)
+        score = round((raw - 0.5) * 2, 3) if raw is not None else None  # normalizar a -1..+1
+
+        # Noticias recientes (últimas 24hs)
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+        url_news = (f"https://finnhub.io/api/v1/company-news"
+                    f"?symbol={sym}&from={yesterday}&to={today}&token={FINNHUB_API_KEY}")
+        rn = requests.get(url_news, timeout=8)
+        news_raw = rn.json() if rn.status_code == 200 else []
+        news = []
+        for n in news_raw[:5]:
+            news.append({
+                "title":  n.get("headline", ""),
+                "source": "Finnhub",
+                "url":    n.get("url", ""),
+                "ts":     datetime.utcfromtimestamp(n.get("datetime", 0)).strftime("%d/%m %H:%M") if n.get("datetime") else ""
+            })
+        return score, news
+    except Exception as e:
+        print(f"Finnhub sentiment error {sym}: {e}")
+        return None, []
+
+def _newsapi_sentiment(sym):
+    """
+    NewsAPI: busca noticias del ticker, hace análisis básico de keywords.
+    Devuelve score estimado entre -1 y +1 y lista de noticias.
+    """
+    POSITIVE_WORDS = ["surge", "soar", "beat", "bullish", "gains", "record", "strong",
+                      "growth", "upgrade", "buy", "profit", "rally", "outperform",
+                      "rises", "higher", "positive", "boom", "jumps"]
+    NEGATIVE_WORDS = ["drop", "fall", "miss", "bearish", "losses", "decline", "weak",
+                      "downgrade", "sell", "loss", "crash", "underperform",
+                      "lower", "negative", "warn", "cut", "risk", "plunge"]
+    try:
+        # Mapear tickers a nombres de empresa para mejor búsqueda
+        COMPANY_NAMES = {
+            "NVDA": "NVIDIA", "MSFT": "Microsoft", "META": "Meta",
+            "GOOGL": "Google", "AMZN": "Amazon", "PLTR": "Palantir",
+            "ARKK": "ARK Innovation", "QQQ": "NASDAQ ETF",
+            "MU": "Micron", "TSM": "TSMC", "CEG": "Constellation Energy",
+            "GEV": "GE Vernova"
+        }
+        query = COMPANY_NAMES.get(sym, sym)
+        url = (f"https://newsapi.org/v2/everything"
+               f"?q={query}&language=en&sortBy=publishedAt"
+               f"&pageSize=10&apiKey={NEWS_API_KEY}")
+        r = requests.get(url, timeout=8)
+        data = r.json()
+        articles = data.get("articles", [])
+
+        pos = neg = 0
+        news = []
+        for a in articles[:10]:
+            title = (a.get("title") or "").lower()
+            desc  = (a.get("description") or "").lower()
+            text  = title + " " + desc
+            p = sum(1 for w in POSITIVE_WORDS if w in text)
+            n = sum(1 for w in NEGATIVE_WORDS if w in text)
+            pos += p
+            neg += n
+            if len(news) < 5:
+                news.append({
+                    "title":  a.get("title", ""),
+                    "source": a.get("source", {}).get("name", "NewsAPI"),
+                    "url":    a.get("url", ""),
+                    "ts":     a.get("publishedAt", "")[:16].replace("T", " ")
+                })
+
+        total = pos + neg
+        score = round((pos - neg) / total, 3) if total > 0 else None
+        return score, news
+    except Exception as e:
+        print(f"NewsAPI sentiment error {sym}: {e}")
+        return None, []
+
+def _alpaca_news_sentiment(sym):
+    """
+    Alpaca News API: noticias del ticker de las últimas 24hs.
+    Análisis básico por keywords.
+    """
+    POSITIVE_WORDS = ["surge", "soar", "beat", "bullish", "gains", "record", "strong",
+                      "growth", "upgrade", "buy", "profit", "rally", "outperform",
+                      "rises", "higher", "positive", "boom", "jumps"]
+    NEGATIVE_WORDS = ["drop", "fall", "miss", "bearish", "losses", "decline", "weak",
+                      "downgrade", "sell", "loss", "crash", "underperform",
+                      "lower", "negative", "warn", "cut", "risk", "plunge"]
+    try:
+        end   = datetime.utcnow()
+        start = end - timedelta(days=1)
+        url = (f"https://data.alpaca.markets/v1beta1/news"
+               f"?symbols={sym}"
+               f"&start={start.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+               f"&end={end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+               f"&limit=10")
+        headers = {
+            "APCA-API-KEY-ID":     ALPACA_API_KEY or "",
+            "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY or ""
+        }
+        r = requests.get(url, headers=headers, timeout=8)
+        data = r.json()
+        articles = data.get("news", [])
+
+        pos = neg = 0
+        news = []
+        for a in articles[:10]:
+            headline = (a.get("headline") or "").lower()
+            summary  = (a.get("summary") or "").lower()
+            text = headline + " " + summary
+            p = sum(1 for w in POSITIVE_WORDS if w in text)
+            n = sum(1 for w in NEGATIVE_WORDS if w in text)
+            pos += p
+            neg += n
+            if len(news) < 5:
+                news.append({
+                    "title":  a.get("headline", ""),
+                    "source": a.get("source", "Alpaca News"),
+                    "url":    a.get("url", ""),
+                    "ts":     (a.get("created_at") or "")[:16].replace("T", " ")
+                })
+
+        total = pos + neg
+        score = round((pos - neg) / total, 3) if total > 0 else None
+        return score, news
+    except Exception as e:
+        print(f"Alpaca news sentiment error {sym}: {e}")
+        return None, []
+
+def _combined_sentiment(sym):
+    """
+    Combina las tres fuentes con pesos:
+    Finnhub (50%) > Alpaca News (30%) > NewsAPI (20%)
+    Devuelve dict con score, label, sources, news.
+    """
+    fh_score, fh_news = _finnhub_sentiment(sym)
+    na_score, na_news = _newsapi_sentiment(sym)
+    al_score, al_news = _alpaca_news_sentiment(sym)
+
+    WEIGHTS = {"finnhub": 0.5, "alpaca": 0.3, "newsapi": 0.2}
+
+    weighted_sum = 0.0
+    weight_total = 0.0
+    if fh_score is not None:
+        weighted_sum += fh_score * WEIGHTS["finnhub"]
+        weight_total += WEIGHTS["finnhub"]
+    if al_score is not None:
+        weighted_sum += al_score * WEIGHTS["alpaca"]
+        weight_total += WEIGHTS["alpaca"]
+    if na_score is not None:
+        weighted_sum += na_score * WEIGHTS["newsapi"]
+        weight_total += WEIGHTS["newsapi"]
+
+    combined = round(weighted_sum / weight_total, 3) if weight_total > 0 else 0.0
+
+    # Deduplicar noticias por título
+    seen = set()
+    all_news = []
+    for n in (fh_news + al_news + na_news):
+        key = n["title"][:60]
+        if key and key not in seen:
+            seen.add(key)
+            all_news.append(n)
+        if len(all_news) >= 8:
+            break
+
+    return {
+        "score":   combined,
+        "label":   _label(combined),
+        "sources": {
+            "finnhub": round(fh_score, 3) if fh_score is not None else None,
+            "alpaca":  round(al_score, 3) if al_score is not None else None,
+            "newsapi": round(na_score, 3) if na_score is not None else None,
+        },
+        "news":    all_news,
+        "updated": datetime.utcnow().strftime("%H:%M UTC")
+    }
+
+def update_sentiment_cache():
+    """
+    Actualiza el sentiment de todos los tickers.
+    Se llama desde el thread de sentiment cada 15 min.
+    """
+    print("📰 Actualizando sentiment cache...")
+    # Solo acciones (crypto no tiene cobertura de noticias suficiente)
+    for sym in STOCK_SYMBOLS:
+        try:
+            result = _combined_sentiment(sym)
+            with sentiment_lock:
+                sentiment_cache[sym] = result
+            print(f"  {sym}: {result['label']} ({result['score']:+.2f})")
+            time.sleep(1.2)  # Respetar rate limits de Finnhub (60 req/min)
+        except Exception as e:
+            print(f"  Error sentiment {sym}: {e}")
+    print("✅ Sentiment cache actualizado")
+
+def get_sentiment_bonus(sym):
+    """
+    Devuelve el ajuste de señal basado en sentiment.
+    Rango: -0.3 a +0.3
+    """
+    with sentiment_lock:
+        s = sentiment_cache.get(sym)
+    if not s:
+        return 0.0
+    # score va de -1 a +1, mapeamos a -0.3 / +0.3
+    return round(s["score"] * 0.3, 4)
+
+def sentiment_loop():
+    """Thread que actualiza el sentiment cada 15 minutos."""
+    print("📰 Sentiment loop iniciado")
+    # Primera actualización al arrancar (con delay de 10s para no chocar con el boot)
+    time.sleep(10)
+    while True:
+        try:
+            update_sentiment_cache()
+        except Exception as e:
+            print(f"❌ Error en sentiment loop: {e}")
+        time.sleep(SENTIMENT_UPDATE_INTERVAL)
+
+# -------------------------------------------------------
 
 def is_market_open():
-    """Devuelve True si el mercado de acciones NYSE/NASDAQ está abierto ahora."""
     import pytz
     et = pytz.timezone("America/New_York")
     now_et = datetime.now(et)
-    if now_et.weekday() >= 5:  # sábado=5, domingo=6
+    if now_et.weekday() >= 5:
         return False
     market_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
     market_close = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
     return market_open <= now_et < market_close
 
 def get_stock_bar_prices():
-    """
-    Cierre de la última vela de 5min para cada acción.
-    Solo llamar durante horario de mercado.
-    """
     prices = {}
     try:
         end   = datetime.utcnow()
-        start = end - timedelta(minutes=15)  # ventana amplia para asegurar al menos 1 vela
+        start = end - timedelta(minutes=15)
         req = StockBarsRequest(
             symbol_or_symbols=STOCK_SYMBOLS,
             timeframe=TimeFrame.Minute5,
@@ -92,7 +352,6 @@ def get_stock_bar_prices():
     return prices
 
 def get_crypto_prices():
-    """Último quote de crypto (24/7)."""
     prices = {}
     try:
         crypto_req = CryptoLatestQuoteRequest(symbol_or_symbols=list(CRYPTO_SYMBOLS.values()))
@@ -134,7 +393,7 @@ def run_backtest(s, days=200):
     end = datetime.now()
     start = end - timedelta(days=days)
     start_str = start.strftime("%Y-%m-%d")
-    end_str = end.strftime("%Y-%m-%d")
+    end_str   = end.strftime("%Y-%m-%d")
 
     historical_prices = {sym: [] for sym in BASE_PRICES}
     try:
@@ -155,7 +414,7 @@ def run_backtest(s, days=200):
                 if sym_data:
                     historical_prices[sym] = [float(p) for p in sym_data]
                     print(f"  {sym}: {len(historical_prices[sym])} dias")
-        print(f"✅ Datos históricos acciones descargados")
+        print("✅ Datos históricos acciones descargados")
     except Exception as e:
         print(f"❌ Error descargando histórico acciones: {e}")
 
@@ -176,8 +435,7 @@ def run_backtest(s, days=200):
                     sym_data = crypto_df["close"].tolist()
                 if sym_data:
                     historical_prices[local_sym] = [float(p) for p in sym_data]
-                    print(f"  {local_sym}: {len(historical_prices[local_sym])} dias")
-        print(f"✅ Datos históricos crypto descargados")
+        print("✅ Datos históricos crypto descargados")
     except Exception as e:
         print(f"❌ Error descargando histórico crypto: {e}")
 
@@ -187,15 +445,8 @@ def run_backtest(s, days=200):
         log(s, "⚠️ Datos históricos insuficientes", "warn")
         return
     min_days = max(available.values())
-    print(f"📊 Días disponibles por símbolo: {available}")
-    if min_days < 2:
-        print("⚠️ Datos históricos insuficientes para backtest")
-        log(s, "⚠️ Datos históricos insuficientes", "warn")
-        return
 
-    bt_wins = 0
-    bt_losses = 0
-    bt_trades = 0
+    bt_wins = bt_losses = bt_trades = 0
 
     for i in range(1, min_days):
         for sym in BASE_PRICES:
@@ -209,21 +460,21 @@ def run_backtest(s, days=200):
         T = THRESHOLDS[s["config"]["risk"]]
         for sym in BASE_PRICES:
             move = s["prices"][sym]["move"]
-            vol = VOLATILITY[sym]
-            sc = s["scores"][sym]["score"]
+            vol  = VOLATILITY[sym]
+            sc   = s["scores"][sym]["score"]
             mult = 1.4
-            sig = round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
+            sig  = round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
 
-            pos = s["positions"].get(sym)
+            pos     = s["positions"].get(sym)
             has_pos = pos and pos.get("qty", 0) > 0
-            price = s["prices"][sym]["price"]
+            price   = s["prices"][sym]["price"]
 
             if sig >= T["buy"] and not has_pos and s["cash"] > price * 0.001:
                 budget = round(s["cash"] * 0.2, 2)
-                qty = round(budget / price, 3)
-                cost = round(qty * price, 2)
+                qty    = round(budget / price, 3)
+                cost   = round(qty * price, 2)
                 if qty > 0 and cost <= s["cash"]:
-                    s["cash"] = round(s["cash"] - cost, 2)
+                    s["cash"] -= cost
                     s["positions"][sym] = {"qty": qty, "avg_cost": price}
                     bt_trades += 1
 
@@ -236,17 +487,14 @@ def run_backtest(s, days=200):
                 update_brain(s, sym, won, ret)
                 pos["qty"] = 0
                 bt_trades += 1
-                if won:
-                    bt_wins += 1
-                else:
-                    bt_losses += 1
+                if won: bt_wins += 1
+                else:   bt_losses += 1
 
         sl = s["config"]["sl"] / 100
         tp = s["config"]["tp"] / 100
         for sym in list(s["positions"].keys()):
             pos = s["positions"].get(sym)
-            if not pos or pos.get("qty", 0) <= 0:
-                continue
+            if not pos or pos.get("qty", 0) <= 0: continue
             cur = s["prices"][sym]["price"]
             ret = (cur - pos["avg_cost"]) / pos["avg_cost"]
             if ret <= -sl or ret >= tp:
@@ -256,10 +504,8 @@ def run_backtest(s, days=200):
                 update_brain(s, sym, pnl > 0, ret)
                 pos["qty"] = 0
                 bt_trades += 1
-                if pnl > 0:
-                    bt_wins += 1
-                else:
-                    bt_losses += 1
+                if pnl > 0: bt_wins += 1
+                else:        bt_losses += 1
 
     for sym in list(s["positions"].keys()):
         pos = s["positions"].get(sym)
@@ -267,18 +513,14 @@ def run_backtest(s, days=200):
             pos["qty"] = 0
 
     s["cash"] = s["start_cap"]
-    s["wins"] = 0
-    s["losses"] = 0
-    s["positions"] = {}
+    s["wins"] = s["losses"] = 0
+    s["positions"]  = {}
     s["backtest_done"] = True
     s["backtest_summary"] = {
-        "dias": min_days,
-        "trades_simulados": bt_trades,
-        "wins": bt_wins,
-        "losses": bt_losses,
+        "dias": min_days, "trades_simulados": bt_trades,
+        "wins": bt_wins, "losses": bt_losses,
         "wr": round(bt_wins / bt_trades * 100) if bt_trades > 0 else 0
     }
-
     wr = round(bt_wins / bt_trades * 100) if bt_trades > 0 else 0
     print(f"✅ Backtest completado: {min_days} días · {bt_trades} trades · WR {wr}%")
     log(s, f"✅ Backtest {min_days} días completado · {bt_trades} trades · WR {wr}%", "think")
@@ -288,13 +530,12 @@ def run_backtest(s, days=200):
 # ---- DB ----
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-    return conn
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def init_db():
     try:
         conn = get_db()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS agent_state (
                 id INTEGER PRIMARY KEY DEFAULT 1,
@@ -322,26 +563,20 @@ def init_db():
 
 BASE_PRICES = {
     "NVDA": 875, "MSFT": 380, "META": 515, "GOOGL": 168,
-    "AMZN": 192, "PLTR": 24, "ARKK": 48, "QQQ": 447,
-    "MU": 90, "TSM": 160, "CEG": 250, "GEV": 360
+    "AMZN": 192, "PLTR": 24,  "ARKK": 48,  "QQQ": 447,
+    "MU":   90,  "TSM":  160, "CEG":  250, "GEV":  360
 }
 VOLATILITY = {
     "NVDA": 0.022, "MSFT": 0.014, "META": 0.020, "GOOGL": 0.015,
-    "AMZN": 0.017, "PLTR": 0.035, "ARKK": 0.025, "QQQ": 0.013,
-    "MU": 0.030, "TSM": 0.022, "CEG": 0.025, "GEV": 0.028
+    "AMZN": 0.017, "PLTR": 0.035, "ARKK": 0.025, "QQQ":   0.013,
+    "MU":   0.030, "TSM":  0.022, "CEG":  0.025, "GEV":   0.028
 }
 SECTORS = {
-    "NVDA": "Chips IA", "MSFT": "Cloud/IA", "META": "IA Consumo",
-    "GOOGL": "IA/Search", "AMZN": "Cloud", "PLTR": "Data IA",
-    "ARKK": "ETF Tech", "QQQ": "ETF NASDAQ", "MU": "Chips/Memoria", "TSM": "Chips IA",
-    "CEG": "Energía", "GEV": "Energía"
+    "NVDA": "Chips IA",     "MSFT": "Cloud/IA",    "META": "IA Consumo",
+    "GOOGL":"IA/Search",    "AMZN": "Cloud",        "PLTR": "Data IA",
+    "ARKK": "ETF Tech",     "QQQ":  "ETF NASDAQ",   "MU":   "Chips/Memoria",
+    "TSM":  "Chips IA",     "CEG":  "Energía",      "GEV":  "Energía"
 }
-
-# -------------------------------------------------------
-# THRESHOLDS RECALIBRADOS para señal de medias móviles
-# La señal de cruce produce valores más grandes que la
-# señal anterior, por eso los umbrales son más exigentes
-# -------------------------------------------------------
 THRESHOLDS = {
     "conservative": {"buy": 1.5,  "sell": -1.2},
     "balanced":     {"buy": 0.8,  "sell": -0.6},
@@ -352,9 +587,9 @@ def default_state():
     return {
         "cash": 1000.0, "start_cap": 1000.0,
         "positions": {}, "history": [], "decisions": [], "log": [],
-        "scores": {s: {"score": 50, "trades": 0, "wins": 0, "last": "hold"} for s in BASE_PRICES},
-        "prices": {s: {"price": p, "move": 0, "trend": 0} for s, p in BASE_PRICES.items()},
-        "price_history": {s: [] for s in BASE_PRICES},  # historial para medias móviles
+        "scores":    {s: {"score": 50, "trades": 0, "wins": 0, "last": "hold"} for s in BASE_PRICES},
+        "prices":    {s: {"price": p, "move": 0, "trend": 0} for s, p in BASE_PRICES.items()},
+        "price_history": {s: [] for s in BASE_PRICES},
         "patterns": [], "memory": [], "wins": 0, "losses": 0, "cycle": 0,
         "running": False, "last_cycle_time": 0,
         "config": {"freq": 300, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"},
@@ -364,14 +599,13 @@ def default_state():
 def load_state():
     try:
         conn = get_db()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute("SELECT data FROM agent_state WHERE id = 1")
         row = cur.fetchone()
         cur.close()
         conn.close()
         if row:
             data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-            # Migración: agregar price_history si no existe en estado guardado
             if "price_history" not in data:
                 data["price_history"] = {s: [] for s in BASE_PRICES}
             return data
@@ -382,7 +616,7 @@ def load_state():
 def save_state(s):
     try:
         conn = get_db()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute("""
             INSERT INTO agent_state (id, data, updated_at)
             VALUES (1, %s, NOW())
@@ -404,17 +638,15 @@ def log(s, msg, t="think"):
 
 def simulate_prices(s):
     for sym in BASE_PRICES:
-        vol = VOLATILITY[sym]
+        vol   = VOLATILITY[sym]
         shock = (random.random() - 0.5) * 2
         trend = s["prices"][sym]["trend"] * 0.85 + shock * 0.15
-        move = (trend + (random.random() - 0.5) * 2) * vol
-        prev = s["prices"][sym]["price"]
-        np_ = prev * (1 + move)
-        np_ = round(np_, 2)
+        move  = (trend + (random.random() - 0.5) * 2) * vol
+        prev  = s["prices"][sym]["price"]
+        np_   = round(prev * (1 + move), 2)
         s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(trend, 5)}
 
 def _append_price_history(s):
-    """Guarda el precio actual de cada símbolo en price_history (max 100 puntos)."""
     ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
     for sym in BASE_PRICES:
         ph.setdefault(sym, []).append(s["prices"][sym]["price"])
@@ -422,23 +654,15 @@ def _append_price_history(s):
             ph[sym] = ph[sym][-100:]
 
 def update_prices(s):
-    """
-    Actualiza precios y retorna (usando_real, mercado_abierto).
-    - Acciones: velas de 5min reales si mercado abierto, precio estático si cerrado.
-    - Crypto: quote en tiempo real siempre (24/7).
-    - Modo alpha: simulación completa.
-    """
     mode = s.get("mode", "alpha")
-
     if mode != "beta" or not trading_client:
         simulate_prices(s)
         _append_price_history(s)
         return False, False
 
     market_open = is_market_open()
-    got_real = False
+    got_real    = False
 
-    # --- CRYPTO siempre ---
     crypto = get_crypto_prices()
     for local_sym, new_price in crypto.items():
         prev = s["prices"][local_sym]["price"]
@@ -447,7 +671,6 @@ def update_prices(s):
     if crypto:
         got_real = True
 
-    # --- ACCIONES solo si mercado abierto ---
     if market_open:
         stock_prices = get_stock_bar_prices()
         if stock_prices:
@@ -455,26 +678,21 @@ def update_prices(s):
                 prev = s["prices"][sym]["price"]
                 move = round((new_price - prev) / prev, 5) if prev else 0
                 s["prices"][sym] = {"price": new_price, "move": move, "trend": move}
-            # Simular los que no vinieron (raro, pero por si acaso)
             for sym in STOCK_SYMBOLS:
                 if sym not in stock_prices:
-                    vol = VOLATILITY[sym]
+                    vol  = VOLATILITY[sym]
                     prev = s["prices"][sym]["price"]
                     move = (random.random() - 0.5) * 2 * vol
                     s["prices"][sym] = {"price": round(prev * (1 + move), 2),
                                         "move": round(move, 5), "trend": round(move, 5)}
             got_real = True
         else:
-            # Mercado abierto pero sin datos — simular acciones
             for sym in STOCK_SYMBOLS:
-                vol = VOLATILITY[sym]
+                vol  = VOLATILITY[sym]
                 prev = s["prices"][sym]["price"]
                 move = (random.random() - 0.5) * 2 * vol
                 s["prices"][sym] = {"price": round(prev * (1 + move), 2),
                                     "move": round(move, 5), "trend": round(move, 5)}
-
-        # Solo agregamos al historial cuando el mercado está abierto.
-        # Mercado cerrado → historial pausado → MAs se congelan pero son precisas.
         _append_price_history(s)
 
     return got_real, market_open
@@ -486,17 +704,17 @@ def update_brain(s, sym, won, ret):
     sc = s["scores"][sym]
     sc["trades"] += 1
     if won: sc["wins"] += 1; s["wins"] += 1
-    else: s["losses"] += 1
+    else:   s["losses"] += 1
     sc["score"] = min(97, max(3, sc["score"] + ((7 + random.random()*3) if won else -(9 + random.random()*4))))
     s["memory"].insert(0, {"sym": sym, "won": won, "ret": round(ret*100,2), "sector": SECTORS[sym], "t": ts()})
     if len(s["memory"]) > 80: s["memory"] = s["memory"][:80]
     sm = [m for m in s["memory"] if m["sector"] == SECTORS[sym]]
     if len(sm) >= 3:
-        wr = round(len([m for m in sm if m["won"]]) / len(sm) * 100)
+        wr  = round(len([m for m in sm if m["won"]]) / len(sm) * 100)
         idx = next((i for i,p in enumerate(s["patterns"]) if p["sector"]==SECTORS[sym]), -1)
         obj = {"sector": SECTORS[sym], "wr": wr, "ops": len(sm)}
         if idx >= 0: s["patterns"][idx] = obj
-        else: s["patterns"].append(obj)
+        else:        s["patterns"].append(obj)
 
 def check_sl_tp(s):
     sl = s["config"]["sl"] / 100
@@ -504,49 +722,46 @@ def check_sl_tp(s):
     for sym in list(s["positions"].keys()):
         pos = s["positions"].get(sym)
         if not pos or pos.get("qty", 0) <= 0: continue
-        cur = gp(s, sym)
-        ret = (cur - pos["avg_cost"]) / pos["avg_cost"]
+        cur    = gp(s, sym)
+        ret    = (cur - pos["avg_cost"]) / pos["avg_cost"]
         reason = "stop-loss" if ret <= -sl else "take-profit" if ret >= tp else None
         if not reason: continue
         proceeds = round(pos["qty"] * cur, 2)
-        pnl = round(proceeds - pos["qty"] * pos["avg_cost"], 2)
-
+        pnl      = round(proceeds - pos["qty"] * pos["avg_cost"], 2)
         if s.get("mode") == "beta" and trading_client:
             place_alpaca_order(sym, pos["qty"], "sell")
-
         s["cash"] = round(s["cash"] + proceeds, 2)
         update_brain(s, sym, pnl > 0, ret)
-        s["history"].insert(0, {"t": ts(), "sym": sym, "type": reason, "qty": pos["qty"], "price": cur, "pnl": pnl})
+        s["history"].insert(0,  {"t": ts(), "sym": sym, "type": reason, "qty": pos["qty"], "price": cur, "pnl": pnl})
         s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "SL" if reason=="stop-loss" else "TP",
                                    "price": cur, "detail": f"ret {round(ret*100,2)}%", "won": pnl > 0})
         log(s, f"{reason.upper()} {sym} · ret {round(ret*100,2)}% · P&L ${pnl}", "buy" if pnl>0 else "sell")
         pos["qty"] = 0
 
-# -------------------------------------------------------
-# NUEVA SEÑAL — basada en cruce de medias móviles
-# MA5 vs MA20 sobre historial de precios reales
-# Durante los primeros 20 ciclos usa la señal original
-# -------------------------------------------------------
 def calc_signal(s, sym, mult):
-    hist = s.get("price_history", {}).get(sym, [])
-    move = s["prices"][sym]["move"]
-    vol = VOLATILITY[sym]
-    sc = s["scores"][sym]["score"]
+    """
+    Señal combinada: MA5/MA20 + ajuste de sentiment.
+    El sentiment aporta hasta ±0.3 sobre la señal base.
+    """
+    hist  = s.get("price_history", {}).get(sym, [])
+    move  = s["prices"][sym]["move"]
+    vol   = VOLATILITY[sym]
+    sc    = s["scores"][sym]["score"]
 
     if len(hist) < 20:
-        # Sin historial suficiente — señal original mientras acumula datos
-        return round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
+        sig_base = round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
+    else:
+        ma5  = sum(hist[-5:])  / 5
+        ma20 = sum(hist[-20:]) / 20
+        cross    = (ma5 - ma20) / ma20
+        sig_base = round((cross / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
 
-    ma5  = sum(hist[-5:])  / 5
-    ma20 = sum(hist[-20:]) / 20
-
-    # Cruce de medias normalizado por volatilidad del activo
-    cross = (ma5 - ma20) / ma20
-    sig = round((cross / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
-    return sig
+    # Bonus de sentiment (-0.3 a +0.3)
+    sent_bonus = get_sentiment_bonus(sym)
+    return round(sig_base + sent_bonus, 3)
 
 def run_cycle(s):
-    now = time.time()
+    now  = time.time()
     freq = s["config"].get("freq", 300)
     last = s.get("last_cycle_time", 0)
     if now - last < freq:
@@ -557,7 +772,6 @@ def run_cycle(s):
     mode = s.get("mode", "alpha")
     using_real, market_open = update_prices(s)
 
-    # Mercado cerrado en modo beta — acciones pausadas
     if mode == "beta" and not market_open:
         hist_len = len(s.get("price_history", {}).get("NVDA", []))
         log(s, f"Ciclo #{s['cycle']} · 🔒 Mercado cerrado · historial pausado ({hist_len} pts)", "think")
@@ -565,80 +779,81 @@ def run_cycle(s):
         save_state(s)
         return
 
-    source = "📡 Alpaca velas 5min" if using_real else "🎲 Simulado"
+    source   = "📡 Alpaca velas 5min" if using_real else "🎲 Simulado"
     hist_len = len(s.get("price_history", {}).get("NVDA", []))
-    if hist_len < 20:
-        source += f" · acumulando historial ({hist_len}/20)"
-    else:
-        source += " · MA5/MA20 activa"
+    source  += " · MA5/MA20 activa" if hist_len >= 20 else f" · acumulando historial ({hist_len}/20)"
+
+    # Indicar si sentiment está activo
+    sent_ready = len(sentiment_cache) > 0
+    source += " · 📰 Sentiment activo" if sent_ready else " · ⏳ Sentiment cargando"
 
     log(s, f"Ciclo #{s['cycle']} · {source}", "think")
 
     check_sl_tp(s)
-    T = THRESHOLDS[s["config"]["risk"]]
-    total = s["cash"] + sum(pos["qty"]*gp(s,sym) for sym,pos in s["positions"].items() if pos.get("qty",0)>0)
+    T      = THRESHOLDS[s["config"]["risk"]]
+    total  = s["cash"] + sum(pos["qty"]*gp(s,sym) for sym,pos in s["positions"].items() if pos.get("qty",0)>0)
     budget = round(total * s["config"]["sz"] / 100, 2)
     bought = sold = held = 0
 
     for sym in BASE_PRICES:
-        vol = VOLATILITY[sym]
-        sc = s["scores"][sym]["score"]
         risk = s["config"]["risk"]
         mult = 2.5 if risk=="aggressive" else 0.7 if risk=="conservative" else 1.4
 
-        # Nueva señal basada en medias móviles
         sig = calc_signal(s, sym, mult)
 
-        pos = s["positions"].get(sym)
+        pos     = s["positions"].get(sym)
         has_pos = pos and pos.get("qty", 0) > 0
-        price = gp(s, sym)
+        price   = gp(s, sym)
         s["scores"][sym]["last"] = "compra" if sig>=T["buy"] else "venta" if sig<=T["sell"] else "hold"
+
+        # Guardar sentiment label en el score para mostrarlo en dashboard
+        with sentiment_lock:
+            sent = sentiment_cache.get(sym)
+        s["scores"][sym]["sentiment"] = sent["label"] if sent else "neutral"
+        s["scores"][sym]["sent_score"] = sent["score"] if sent else 0.0
 
         if sig >= T["buy"] and not has_pos and s["cash"] > price * 0.001:
             spend = min(budget, s["cash"] * 0.9)
-            qty = round(spend/price, 6 if price>10000 else 5 if price>1000 else 3 if price>100 else 2)
-            cost = round(qty * price, 2)
+            qty   = round(spend/price, 6 if price>10000 else 5 if price>1000 else 3 if price>100 else 2)
+            cost  = round(qty * price, 2)
             if qty > 0 and cost <= s["cash"] + 0.01:
                 if s.get("mode") == "beta" and trading_client:
                     place_alpaca_order(sym, qty, "buy")
-
                 s["cash"] = round(s["cash"] - cost, 2)
                 s["positions"][sym] = {"qty": qty, "avg_cost": price}
-                s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Compra", "qty": qty, "price": price, "pnl": None})
-                s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "COMPRA", "price": price, "detail": f"señal {sig}"})
-                log(s, f"COMPRA {qty} {sym} a ${price}", "buy")
+                s["history"].insert(0,  {"t": ts(), "sym": sym, "type": "Compra", "qty": qty, "price": price, "pnl": None})
+                s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "COMPRA", "price": price,
+                                           "detail": f"señal {sig} · sent {s['scores'][sym]['sentiment']}"})
+                log(s, f"COMPRA {qty} {sym} a ${price} · sent:{s['scores'][sym]['sentiment']}", "buy")
                 bought += 1
 
         elif sig <= T["sell"] and has_pos:
             proceeds = round(pos["qty"]*price, 2)
-            pnl = round(proceeds - pos["qty"]*pos["avg_cost"], 2)
-
+            pnl      = round(proceeds - pos["qty"]*pos["avg_cost"], 2)
             if s.get("mode") == "beta" and trading_client:
                 place_alpaca_order(sym, pos["qty"], "sell")
-
             s["cash"] = round(s["cash"] + proceeds, 2)
             update_brain(s, sym, pnl>0, (price-pos["avg_cost"])/pos["avg_cost"])
-            s["history"].insert(0, {"t": ts(), "sym": sym, "type": "Venta", "qty": pos["qty"], "price": price, "pnl": pnl})
+            s["history"].insert(0,  {"t": ts(), "sym": sym, "type": "Venta", "qty": pos["qty"], "price": price, "pnl": pnl})
             s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "VENTA", "price": price,
-                                       "detail": f"señal {sig} · P&L ${pnl}", "won": pnl>0})
-            log(s, f"VENTA {pos['qty']} {sym} a ${price} · P&L ${pnl}", "buy" if pnl>0 else "sell")
+                                       "detail": f"señal {sig} · P&L ${pnl} · sent {s['scores'][sym]['sentiment']}",
+                                       "won": pnl>0})
+            log(s, f"VENTA {pos['qty']} {sym} a ${price} · P&L ${pnl} · sent:{s['scores'][sym]['sentiment']}",
+                "buy" if pnl>0 else "sell")
             pos["qty"] = 0
             sold += 1
         else:
             held += 1
 
-    if len(s["history"]) > 500: s["history"] = s["history"][:500]
+    if len(s["history"])   > 500: s["history"]   = s["history"][:500]
     if len(s["decisions"]) > 200: s["decisions"] = s["decisions"][:200]
     save_state(s)
+
 
 init_db()
 init_alpaca()
 state = load_state()
 
-# -------------------------------------------------------
-# AUTO-RESTART — recuerda si el agente estaba corriendo
-# antes de un reinicio del servidor
-# -------------------------------------------------------
 if ALPACA_API_KEY and ALPACA_SECRET_KEY:
     state["mode"] = "beta"
 
@@ -648,7 +863,6 @@ if was_running:
     log(state, "🔄 Servidor reiniciado — agente reanudado automáticamente", "think")
 else:
     print("⏸️  Agente detenido (estado guardado)")
-# -------------------------------------------------------
 
 if stock_data_client and not state.get("backtest_done") and len(state.get("memory", [])) == 0:
     print("🧠 Sin historial detectado — lanzando backtest automático en segundo plano...")
@@ -658,10 +872,6 @@ else:
     if state.get("backtest_done"):
         print("✅ Backtest previo detectado — omitiendo")
 
-# -------------------------------------------------------
-# BACKGROUND LOOP — corre el agente 24/7 sin depender
-# de que alguien visite el dashboard
-# -------------------------------------------------------
 def background_loop():
     print("🔄 Background loop iniciado — el agente corre 24/7")
     while True:
@@ -674,15 +884,22 @@ def background_loop():
 
 bg_thread = threading.Thread(target=background_loop, daemon=True)
 bg_thread.start()
-# -------------------------------------------------------
+
+# Lanzar sentiment loop en background
+sent_thread = threading.Thread(target=sentiment_loop, daemon=True)
+sent_thread.start()
+
+
+# ---- ENDPOINTS ----
 
 @app.route("/")
 def index():
     return jsonify({
         "status": "TradingAgent API running",
-        "cycle": state["cycle"],
-        "mode": state.get("mode", "alpha"),
-        "alpaca_connected": trading_client is not None
+        "cycle":  state["cycle"],
+        "mode":   state.get("mode", "alpha"),
+        "alpaca_connected":  trading_client is not None,
+        "sentiment_symbols": len(sentiment_cache)
     })
 
 @app.route("/dashboard")
@@ -691,28 +908,43 @@ def dashboard():
 
 @app.route("/state")
 def get_state():
-    # run_cycle removido de acá — el background loop ya se encarga.
-    # Llamarlo acá generaba race conditions con el loop de fondo.
     total = state["cash"] + sum(pos["qty"]*gp(state,sym) for sym,pos in state["positions"].items() if pos.get("qty",0)>0)
-    pnl = round(total - state["start_cap"], 2)
-    wr = round(state["wins"]/(state["wins"]+state["losses"])*100) if (state["wins"]+state["losses"])>0 else 0
+    pnl   = round(total - state["start_cap"], 2)
+    wr    = round(state["wins"]/(state["wins"]+state["losses"])*100) if (state["wins"]+state["losses"])>0 else 0
     hist_len = len(state.get("price_history", {}).get("NVDA", []))
     return jsonify({
         "running": state["running"], "cycle": state["cycle"],
-        "cash": round(state["cash"],2), "total": round(total,2),
+        "cash":    round(state["cash"],2), "total": round(total,2),
         "pnl": pnl, "pnl_pct": round(pnl/state["start_cap"]*100,2),
         "wins": state["wins"], "losses": state["losses"], "win_rate": wr,
         "positions": {k:v for k,v in state["positions"].items() if v.get("qty",0)>0},
         "decisions": state["decisions"][:20], "log": state["log"][:100],
-        "scores": state["scores"], "prices": state["prices"],
+        "scores":   state["scores"], "prices": state["prices"],
         "patterns": state["patterns"], "config": state["config"],
         "history_count": len(state["history"]),
-        "mode": state.get("mode", "alpha"),
+        "mode":    state.get("mode", "alpha"),
         "alpaca_connected": trading_client is not None,
-        "ma_ready": hist_len >= 20,
+        "ma_ready":   hist_len >= 20,
         "ma_progress": f"{hist_len}/20",
-        "market_open": is_market_open() if state.get("mode") == "beta" else None
+        "market_open": is_market_open() if state.get("mode") == "beta" else None,
+        "sentiment_ready": len(sentiment_cache) > 0
     })
+
+@app.route("/sentiment")
+def get_sentiment():
+    """Devuelve el sentiment cache completo para el dashboard."""
+    with sentiment_lock:
+        data = dict(sentiment_cache)
+    return jsonify({"sentiment": data, "symbols": len(data)})
+
+@app.route("/sentiment/refresh", methods=["POST"])
+def refresh_sentiment():
+    """Fuerza una actualización inmediata del sentiment."""
+    def _refresh():
+        update_sentiment_cache()
+    t = threading.Thread(target=_refresh, daemon=True)
+    t.start()
+    return jsonify({"ok": True, "msg": "Actualización de sentiment iniciada"})
 
 @app.route("/start", methods=["POST"])
 def start():
@@ -734,29 +966,22 @@ def config():
     data = request.json
     for k in ["freq","sl","tp","sz"]:
         if k in data: state["config"][k] = float(data[k])
-    if "risk" in data: state["config"]["risk"] = data["risk"]
-    if "mode" in data: state["mode"] = data["mode"]
+    if "risk"  in data: state["config"]["risk"] = data["risk"]
+    if "mode"  in data: state["mode"]           = data["mode"]
     save_state(state)
     return jsonify({"ok": True, "config": state["config"], "mode": state.get("mode")})
 
 @app.route("/reset", methods=["POST"])
 def reset():
     global state
-    # Cerrar todas las posiciones abiertas en Alpaca antes de limpiar el estado
     closed = []
     errors = []
     if trading_client:
         for sym, pos in state.get("positions", {}).items():
             if pos and pos.get("qty", 0) > 0:
                 ok = place_alpaca_order(sym, pos["qty"], "sell")
-                if ok:
-                    closed.append(sym)
-                else:
-                    errors.append(sym)
-        if closed:
-            print(f"🔄 Reset: posiciones cerradas en Alpaca: {closed}")
-        if errors:
-            print(f"⚠️ Reset: no se pudieron cerrar: {errors}")
+                if ok:  closed.append(sym)
+                else:   errors.append(sym)
     state = default_state()
     if ALPACA_API_KEY and ALPACA_SECRET_KEY:
         state["mode"] = "beta"
@@ -770,10 +995,10 @@ def history():
 @app.route("/backtest/status")
 def backtest_status():
     return jsonify({
-        "done": state.get("backtest_done", False),
-        "summary": state.get("backtest_summary", None),
+        "done":        state.get("backtest_done", False),
+        "summary":     state.get("backtest_summary", None),
         "memory_size": len(state.get("memory", [])),
-        "patterns": state.get("patterns", [])
+        "patterns":    state.get("patterns", [])
     })
 
 @app.route("/alpaca/status")
@@ -784,9 +1009,9 @@ def alpaca_status():
         account = trading_client.get_account()
         return jsonify({
             "connected": True,
-            "account_id": str(account.id),
-            "status": str(account.status),
-            "buying_power": str(account.buying_power),
+            "account_id":      str(account.id),
+            "status":          str(account.status),
+            "buying_power":    str(account.buying_power),
             "portfolio_value": str(account.portfolio_value),
             "paper": "paper" in ALPACA_BASE_URL
         })
@@ -798,7 +1023,7 @@ def save_report():
     data = request.json
     try:
         conn = get_db()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute("""
             INSERT INTO reports (texto, capital, pnl_pct, ops, win_rate, ciclos)
             VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
@@ -818,20 +1043,20 @@ def save_report():
 def get_reports():
     try:
         conn = get_db()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur  = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM reports ORDER BY created_at DESC LIMIT 100")
         reports = []
         for row in cur.fetchall():
             reports.append({
-                "id": row["id"],
-                "fecha": row["created_at"].strftime("%d/%m/%Y %H:%M:%S"),
-                "texto": row["texto"],
+                "id":     row["id"],
+                "fecha":  row["created_at"].strftime("%d/%m/%Y %H:%M:%S"),
+                "texto":  row["texto"],
                 "resumen": {
-                    "capital": row["capital"],
-                    "pnl_pct": row["pnl_pct"],
-                    "ops": row["ops"],
+                    "capital":  row["capital"],
+                    "pnl_pct":  row["pnl_pct"],
+                    "ops":      row["ops"],
                     "win_rate": row["win_rate"],
-                    "ciclos": row["ciclos"]
+                    "ciclos":   row["ciclos"]
                 }
             })
         cur.close()
