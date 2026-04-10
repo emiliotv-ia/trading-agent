@@ -371,9 +371,27 @@ def load_state():
         conn.close()
         if row:
             data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-            # Migración: agregar price_history si no existe en estado guardado
+            # Migración: agregar price_history si no existe
             if "price_history" not in data:
                 data["price_history"] = {s: [] for s in BASE_PRICES}
+            # Migración: eliminar símbolos viejos (BTC/ETH/etc) y agregar los nuevos (MU/TSM/CEG/GEV)
+            valid = set(BASE_PRICES.keys())
+            data["scores"] = {
+                s: data["scores"].get(s, {"score": 50, "trades": 0, "wins": 0, "last": "hold"})
+                for s in valid
+            }
+            data["prices"] = {
+                s: data["prices"].get(s, {"price": BASE_PRICES[s], "move": 0, "trend": 0})
+                for s in valid
+            }
+            data["price_history"] = {
+                s: data["price_history"].get(s, [])
+                for s in valid
+            }
+            # Limpiar posiciones de símbolos viejos
+            data["positions"] = {
+                k: v for k, v in data.get("positions", {}).items() if k in valid
+            }
             return data
     except Exception as e:
         print(f"Load state error: {e}")
