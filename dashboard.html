@@ -66,6 +66,37 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
 .hist-stats{display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;}
 .hist-stat{font-size:12px;color:#555;}
 .hist-stat span{font-weight:600;color:#111;}
+
+/* SENTIMENT */
+.sent-bullish{background:#dcfce7;color:#166534;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:600;}
+.sent-bearish{background:#fee2e2;color:#991b1b;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:600;}
+.sent-neutral{background:#f3f4f6;color:#555;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:600;}
+.sent-dot-bullish{width:8px;height:8px;border-radius:50%;background:#1D9E75;display:inline-block;}
+.sent-dot-bearish{width:8px;height:8px;border-radius:50%;background:#E24B4A;display:inline-block;}
+.sent-dot-neutral{width:8px;height:8px;border-radius:50%;background:#aaa;display:inline-block;}
+
+.news-item{padding:10px 0;border-bottom:1px solid #f0f0f0;}
+.news-item:last-child{border-bottom:none;}
+.news-title{font-size:13px;color:#111;margin-bottom:4px;line-height:1.4;}
+.news-title a{color:#111;text-decoration:none;}
+.news-title a:hover{text-decoration:underline;}
+.news-meta{font-size:11px;color:#aaa;display:flex;gap:10px;flex-wrap:wrap;}
+.news-source{background:#f3f4f6;color:#555;padding:1px 6px;border-radius:3px;font-size:10px;}
+
+.sent-overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:20px;}
+.sent-overview-card{background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:10px 12px;}
+.sent-overview-sym{font-size:13px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:6px;}
+.sent-overview-score{font-size:20px;font-weight:700;}
+.sent-overview-src{font-size:10px;color:#aaa;margin-top:4px;}
+
+.sent-bar-wrap{height:6px;border-radius:3px;background:#f0f0f0;margin-top:4px;overflow:hidden;}
+.sent-bar-fill{height:100%;border-radius:3px;transition:width .5s;}
+
+.ticker-filter{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;}
+.ticker-btn{padding:5px 12px;border-radius:6px;border:1px solid #ddd;background:#fff;font-size:12px;cursor:pointer;font-weight:500;}
+.ticker-btn.active{background:#111;color:#fff;border-color:#111;}
+.ticker-btn:hover:not(.active){background:#f5f5f5;}
+
 @media(max-width:600px){.mg{grid-template-columns:repeat(2,1fr);}}
 
 /* LOGIN */
@@ -93,7 +124,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
   </div>
 </div>
 
-<!-- DASHBOARD (oculto hasta login) -->
+<!-- DASHBOARD -->
 <div id="app" style="display:none;">
 
 <div class="header">
@@ -115,7 +146,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
       <span id="agent-lbl" style="font-size:13px;color:#888;">—</span>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn btn-report" onclick="showTab('reporte',document.querySelectorAll('.tab')[4])">Generar reporte para Claude</button>
+      <button class="btn btn-report" onclick="showTab('reporte',document.querySelectorAll('.tab')[5])">Generar reporte para Claude</button>
       <button class="btn btn-go" id="btn-toggle" onclick="toggleAgent()">Iniciar agente</button>
       <button class="btn" onclick="resetAgent()">Reiniciar portfolio</button>
     </div>
@@ -125,11 +156,13 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     <button class="tab active" onclick="showTab('dash',this)">Dashboard</button>
     <button class="tab" onclick="showTab('log',this)">Log en vivo</button>
     <button class="tab" onclick="showTab('learn',this)">Aprendizaje</button>
+    <button class="tab" onclick="showTab('sentiment',this);loadSentiment()">Sentiment</button>
     <button class="tab" onclick="showTab('cfg',this)">Configurar</button>
     <button class="tab" onclick="showTab('reporte',this)">Reporte Claude</button>
     <button class="tab" onclick="showTab('historial',this);loadReportHistory()">Historial reportes</button>
   </div>
 
+  <!-- DASHBOARD TAB -->
   <div id="tab-dash" class="sp active">
     <div class="mg">
       <div class="mc"><div class="ml">Capital total</div><div class="mv" id="m-cap">—</div><div class="ms" id="m-pct">—</div></div>
@@ -147,6 +180,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     </div>
   </div>
 
+  <!-- LOG TAB -->
   <div id="tab-log" class="sp">
     <div class="card">
       <div class="ct">Log del servidor <span id="log-count" style="font-size:11px;font-weight:400;"></span></div>
@@ -154,6 +188,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     </div>
   </div>
 
+  <!-- APRENDIZAJE TAB -->
   <div id="tab-learn" class="sp">
     <div class="card">
       <div class="ct">Score de confianza por activo</div>
@@ -165,6 +200,40 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     </div>
   </div>
 
+  <!-- SENTIMENT TAB -->
+  <div id="tab-sentiment" class="sp">
+    <div class="card">
+      <div class="ct">
+        Sentiment de mercado
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span id="sent-updated" style="font-size:11px;color:#aaa;"></span>
+          <button class="btn" style="padding:5px 14px;font-size:12px;" onclick="refreshSentiment()">Actualizar ahora</button>
+        </div>
+      </div>
+      <p style="font-size:12px;color:#888;margin-bottom:16px;line-height:1.6;">
+        Análisis combinado de <strong>Finnhub</strong> (50%), <strong>Alpaca News</strong> (30%) y <strong>NewsAPI</strong> (20%). Se actualiza automáticamente cada 15 minutos. Influye en las decisiones del agente ajustando la señal MA en hasta ±0.3.
+      </p>
+
+      <!-- Overview cards -->
+      <div class="sent-overview-grid" id="sent-overview">
+        <div style="font-size:13px;color:#888;grid-column:1/-1;text-align:center;padding:2rem 0;">Cargando sentiment...</div>
+      </div>
+    </div>
+
+    <!-- Feed de noticias por ticker -->
+    <div class="card">
+      <div class="ct">Noticias recientes por activo</div>
+
+      <!-- Filtro por ticker -->
+      <div class="ticker-filter" id="ticker-filter"></div>
+
+      <div id="news-feed">
+        <div style="font-size:13px;color:#888;text-align:center;padding:2rem 0;">Seleccioná un activo para ver sus noticias.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONFIG TAB -->
   <div id="tab-cfg" class="sp">
     <div class="card">
       <div class="ct">Parámetros del agente</div>
@@ -208,6 +277,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     <div style="text-align:right;"><button class="btn btn-go" onclick="saveConfig()">Guardar en servidor</button></div>
   </div>
 
+  <!-- REPORTE TAB -->
   <div id="tab-reporte" class="sp">
     <div class="card">
       <div class="ct">Reporte para Claude</div>
@@ -228,6 +298,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
     </div>
   </div>
 
+  <!-- HISTORIAL TAB -->
   <div id="tab-historial" class="sp">
     <div class="card">
       <div class="ct">Historial de reportes guardados <span id="hist-count" style="font-size:11px;font-weight:400;color:#888;"></span></div>
@@ -240,9 +311,6 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#11
 </div><!-- fin #app -->
 
 <script>
-// -------------------------------------------------------
-// LOGIN — cambiá esta contraseña por la que quieras
-// -------------------------------------------------------
 const PASSWORD = 'Pichuki12*';
 
 function checkLogin(){
@@ -252,6 +320,7 @@ function checkLogin(){
     document.getElementById('login-screen').style.display='none';
     document.getElementById('app').style.display='block';
     fetchState();
+    loadSentimentQuiet();
   } else {
     document.getElementById('login-error').style.display='block';
     document.getElementById('pwd-input').value='';
@@ -259,16 +328,16 @@ function checkLogin(){
   }
 }
 
-// Si ya autenticó en esta sesión, saltar el login
 if(sessionStorage.getItem('auth')==='ok'){
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='block';
 }
-// -------------------------------------------------------
 
 const SECTOR={NVDA:'Chips IA',MSFT:'Cloud/IA',META:'IA Consumo',GOOGL:'IA/Search',AMZN:'Cloud',PLTR:'Data IA',ARKK:'ETF Tech',QQQ:'ETF NASDAQ',MU:'Chips/Memoria',TSM:'Chips IA',CEG:'Energía',GEV:'Energía'};
 let agentRunning=false;
 let lastData=null;
+let sentimentData={};
+let activeTickerFilter=null;
 
 function fmt(n){return'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function fmtS(n){return(n>=0?'+':'')+fmt(n);}
@@ -312,6 +381,152 @@ function updateBtn(running){
   }
 }
 
+// ---- Sentiment helpers ----
+function sentClass(label){
+  if(label==='bullish') return 'sent-bullish';
+  if(label==='bearish') return 'sent-bearish';
+  return 'sent-neutral';
+}
+function sentDot(label){
+  if(label==='bullish') return 'sent-dot-bullish';
+  if(label==='bearish') return 'sent-dot-bearish';
+  return 'sent-dot-neutral';
+}
+function sentEmoji(label){
+  if(label==='bullish') return '🟢';
+  if(label==='bearish') return '🔴';
+  return '🟡';
+}
+function sentColor(score){
+  if(score>=0.15) return '#1D9E75';
+  if(score<=-0.15) return '#E24B4A';
+  return '#f59e0b';
+}
+// score -1..+1 → bar width 0..100%
+function sentBarWidth(score){
+  return Math.round((score+1)/2*100);
+}
+
+// ---- Cargar sentiment (silencioso, sin cambiar tab) ----
+async function loadSentimentQuiet(){
+  try{
+    const d = await api('/sentiment');
+    sentimentData = d.sentiment || {};
+  }catch(e){}
+}
+
+// ---- Cargar sentiment (visible, desde tab) ----
+async function loadSentiment(){
+  try{
+    const d = await api('/sentiment');
+    sentimentData = d.sentiment || {};
+    renderSentimentTab();
+  }catch(e){
+    document.getElementById('sent-overview').innerHTML='<div style="font-size:13px;color:#888;grid-column:1/-1;text-align:center;padding:2rem 0;">Error cargando sentiment.</div>';
+  }
+}
+
+async function refreshSentiment(){
+  const btn = document.querySelector('#tab-sentiment .btn');
+  if(btn){ btn.textContent='Actualizando...'; btn.disabled=true; }
+  try{
+    await api('/sentiment/refresh','POST');
+    // Esperar 3s y recargar (el update tarda unos segundos)
+    setTimeout(async()=>{
+      await loadSentiment();
+      if(btn){ btn.textContent='Actualizar ahora'; btn.disabled=false; }
+    }, 3000);
+  }catch(e){
+    if(btn){ btn.textContent='Actualizar ahora'; btn.disabled=false; }
+  }
+}
+
+function renderSentimentTab(){
+  const syms = Object.keys(sentimentData);
+  if(!syms.length){
+    document.getElementById('sent-overview').innerHTML='<div style="font-size:13px;color:#888;grid-column:1/-1;text-align:center;padding:2rem 0;">Sentiment cargando... (primera actualización tarda ~3 min).</div>';
+    return;
+  }
+
+  // Updated timestamp
+  const firstSym = syms[0];
+  const updTs = sentimentData[firstSym]?.updated || '';
+  document.getElementById('sent-updated').textContent = updTs ? 'Actualizado: '+updTs : '';
+
+  // Overview cards
+  const overviewEl = document.getElementById('sent-overview');
+  overviewEl.innerHTML = syms.sort().map(sym=>{
+    const s = sentimentData[sym];
+    const score = s.score ?? 0;
+    const label = s.label || 'neutral';
+    const barW  = sentBarWidth(score);
+    const color = sentColor(score);
+    const srcTexts = [];
+    if(s.sources?.finnhub != null) srcTexts.push(`FH: ${s.sources.finnhub>0?'+':''}${s.sources.finnhub.toFixed(2)}`);
+    if(s.sources?.alpaca  != null) srcTexts.push(`AL: ${s.sources.alpaca>0?'+':''}${s.sources.alpaca.toFixed(2)}`);
+    if(s.sources?.newsapi != null) srcTexts.push(`NW: ${s.sources.newsapi>0?'+':''}${s.sources.newsapi.toFixed(2)}`);
+    return `<div class="sent-overview-card">
+      <div class="sent-overview-sym">
+        <span class="${sentDot(label)}"></span>
+        <span>${sym}</span>
+      </div>
+      <div class="sent-overview-score" style="color:${color};">${score>=0?'+':''}${score.toFixed(2)}</div>
+      <span class="${sentClass(label)}">${label}</span>
+      <div class="sent-bar-wrap"><div class="sent-bar-fill" style="width:${barW}%;background:${color};"></div></div>
+      <div class="sent-overview-src">${srcTexts.join(' · ')}</div>
+    </div>`;
+  }).join('');
+
+  // Ticker filter
+  buildTickerFilter(syms);
+
+  // Si hay un ticker activo, mostrar su feed
+  if(activeTickerFilter && sentimentData[activeTickerFilter]){
+    renderNewsFeed(activeTickerFilter);
+  } else {
+    document.getElementById('news-feed').innerHTML='<div style="font-size:13px;color:#888;text-align:center;padding:2rem 0;">Seleccioná un activo para ver sus noticias.</div>';
+  }
+}
+
+function buildTickerFilter(syms){
+  const el = document.getElementById('ticker-filter');
+  el.innerHTML = syms.sort().map(sym=>{
+    const s = sentimentData[sym];
+    const label = s?.label || 'neutral';
+    const active = sym === activeTickerFilter ? ' active' : '';
+    return `<button class="ticker-btn${active}" onclick="selectTicker('${sym}')">${sentEmoji(label)} ${sym}</button>`;
+  }).join('');
+}
+
+function selectTicker(sym){
+  activeTickerFilter = sym;
+  // Update button states
+  document.querySelectorAll('.ticker-btn').forEach(b=>{
+    b.classList.toggle('active', b.textContent.includes(sym));
+  });
+  renderNewsFeed(sym);
+}
+
+function renderNewsFeed(sym){
+  const s = sentimentData[sym];
+  const el = document.getElementById('news-feed');
+  if(!s || !s.news || !s.news.length){
+    el.innerHTML=`<div style="font-size:13px;color:#888;text-align:center;padding:2rem 0;">Sin noticias recientes para ${sym}.</div>`;
+    return;
+  }
+  el.innerHTML=`<div style="font-size:12px;color:#888;margin-bottom:12px;">
+    ${s.news.length} noticias · Sentiment combinado: <strong style="color:${sentColor(s.score)};">${s.score>=0?'+':''}${s.score.toFixed(2)}</strong>
+    <span class="${sentClass(s.label)}" style="margin-left:6px;">${s.label}</span>
+  </div>`+
+  s.news.map(n=>`<div class="news-item">
+    <div class="news-title">${n.url?`<a href="${n.url}" target="_blank" rel="noopener">${n.title||'Sin título'}</a>`:(n.title||'Sin título')}</div>
+    <div class="news-meta">
+      <span class="news-source">${n.source||''}</span>
+      <span>${n.ts||''}</span>
+    </div>
+  </div>`).join('');
+}
+
 function renderState(d){
   document.getElementById('m-cap').textContent=fmt(d.total||0);
   const pEl=document.getElementById('m-pct');
@@ -330,10 +545,14 @@ function renderState(d){
     posEl.innerHTML='<div style="padding:1.5rem 0;text-align:center;font-size:13px;color:#888;">Sin posiciones abiertas.</div>';
   }else{
     posEl.innerHTML='<div class="row rh" style="grid-template-columns:2fr 1fr 1fr 1fr;"><span>Activo</span><span>Entrada</span><span>Qty</span><span>Costo</span></div>'+
-    open.map(([sym,pos])=>`<div class="row" style="grid-template-columns:2fr 1fr 1fr 1fr;">
-      <span style="font-weight:600;">${sym}<span class="badge bb">${SECTOR[sym]||''}</span></span>
-      <span>${fmt(pos.avg_cost)}</span><span>${pos.qty}</span><span>${fmt(pos.qty*pos.avg_cost)}</span>
-    </div>`).join('');
+    open.map(([sym,pos])=>{
+      const sentL = d.scores?.[sym]?.sentiment || null;
+      const sentBadge = sentL ? `<span class="${sentClass(sentL)}" style="margin-left:4px;">${sentEmoji(sentL)} ${sentL}</span>` : '';
+      return `<div class="row" style="grid-template-columns:2fr 1fr 1fr 1fr;">
+        <span style="font-weight:600;">${sym}<span class="badge bb">${SECTOR[sym]||''}</span>${sentBadge}</span>
+        <span>${fmt(pos.avg_cost)}</span><span>${pos.qty}</span><span>${fmt(pos.qty*pos.avg_cost)}</span>
+      </div>`;
+    }).join('');
   }
 
   const decs=(d.decisions||[]).slice(0,12);
@@ -370,9 +589,13 @@ function renderState(d){
     const wr=sc.trades>0?(sc.wins/sc.trades*100).toFixed(0)+'%':'—';
     const col=sc.score>65?'#1D9E75':sc.score<35?'#E24B4A':'#f59e0b';
     const sigCls=sc.last==='compra'?'bg':sc.last==='venta'?'br':'bx';
+    // Sentiment badge en scores
+    const sentL = sc.sentiment || null;
+    const sentBadge = sentL && sentL!=='neutral'
+      ? `<span class="${sentClass(sentL)}" style="font-size:9px;padding:1px 5px;margin-left:2px;">${sentEmoji(sentL)}</span>` : '';
     return `<div style="margin-bottom:12px;">
       <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;">
-        <span style="font-weight:600;">${sym} <span style="color:#888;font-weight:400;">${SECTOR[sym]||''}</span></span>
+        <span style="font-weight:600;">${sym} <span style="color:#888;font-weight:400;">${SECTOR[sym]||''}</span>${sentBadge}</span>
         <div style="display:flex;gap:8px;align-items:center;">
           <span class="badge ${sigCls}">${sc.last||'—'}</span>
           <span style="color:#888;">ops: ${sc.trades} · wr: ${wr}</span>
@@ -423,12 +646,17 @@ async function generarReporte(){
   const decisions=(d.decisions||[]).slice(0,5);
 
   const topActivos=Object.entries(scores).sort((a,b)=>b[1].score-a[1].score).slice(0,3)
-    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100, ops: ${sc.trades}, win rate: ${sc.trades>0?(sc.wins/sc.trades*100).toFixed(0)+'%':'sin ops'})`).join('\n  - ');
+    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100, ops: ${sc.trades}, win rate: ${sc.trades>0?(sc.wins/sc.trades*100).toFixed(0)+'%':'sin ops'}, sentiment: ${sc.sentiment||'—'})`).join('\n  - ');
   const bottomActivos=Object.entries(scores).sort((a,b)=>a[1].score-b[1].score).slice(0,3)
-    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100)`).join('\n  - ');
+    .map(([sym,sc])=>`${sym} (confianza: ${sc.score.toFixed(0)}/100, sentiment: ${sc.sentiment||'—'})`).join('\n  - ');
   const posAbiertas=positions.length>0?positions.map(([sym,pos])=>`${sym}: ${pos.qty} unidades a $${pos.avg_cost}`).join('\n  - '):'Ninguna';
   const patronesTxt=patterns.length>0?patterns.sort((a,b)=>b.wr-a.wr).map(p=>`${p.sector}: ${p.wr}% de aciertos en ${p.ops} operaciones`).join('\n  - '):'Sin patrones detectados aún';
   const ultDecs=decisions.length>0?decisions.map(dec=>`[${dec.t}] ${dec.action} ${dec.sym} a $${dec.price} · ${dec.detail||''}`).join('\n  - '):'Sin operaciones recientes';
+
+  // Sentiment summary
+  const sentSummary = Object.keys(sentimentData).length > 0
+    ? Object.entries(sentimentData).map(([sym,s])=>`${sym}: ${s.label} (${s.score>=0?'+':''}${s.score.toFixed(2)})`).join(', ')
+    : 'Sin datos de sentiment disponibles';
 
   const fechaGen=new Date().toLocaleString('es-AR');
   const reporte=`--- REPORTE AUTOMÁTICO TRADINGAGENT AI ---
@@ -458,6 +686,9 @@ ACTIVOS CON PEOR DESEMPEÑO:
 
 PATRONES APRENDIDOS:
   - ${patronesTxt}
+
+SENTIMENT DE MERCADO (últimos datos):
+  ${sentSummary}
 
 ÚLTIMAS DECISIONES DEL AGENTE:
   - ${ultDecs}
@@ -496,7 +727,7 @@ async function loadReportHistory(){
     document.getElementById('hist-count').textContent=reports.length+' reportes guardados';
     const el=document.getElementById('hist-list');
     if(!reports.length){
-      el.innerHTML='<div style="font-size:13px;color:#888;text-align:center;padding:2rem 0;">No hay reportes guardados aún. Generá tu primer reporte desde la pestaña "Reporte Claude".</div>';
+      el.innerHTML='<div style="font-size:13px;color:#888;text-align:center;padding:2rem 0;">No hay reportes guardados aún.</div>';
       return;
     }
     el.innerHTML=reports.map(r=>{
@@ -554,10 +785,12 @@ function showTab(name,el){
   if(el) el.classList.add('active');
 }
 
-// Solo arranca fetchState si ya está autenticado
 if(sessionStorage.getItem('auth')==='ok'){
   fetchState();
+  loadSentimentQuiet();
   setInterval(fetchState,10000);
+  // Refrescar sentiment en background cada 15 min
+  setInterval(loadSentimentQuiet, 15*60*1000);
   setInterval(()=>fetch('/').catch(()=>{}),600000);
 }
 </script>
