@@ -53,31 +53,10 @@ STOCK_SYMBOLS  = ["NVDA", "MSFT", "META", "GOOGL", "AMZN", "PLTR", "ARKK", "QQQ"
 
 # -------------------------------------------------------
 # SENTIMENT — estado global cacheado
-# Se actualiza cada 15 min en un thread separado
 # -------------------------------------------------------
-# Estructura por ticker:
-# {
-#   "NVDA": {
-#       "score": 0.45,          # -1.0 a +1.0
-#       "label": "bullish",     # bullish / neutral / bearish
-#       "sources": {
-#           "finnhub": 0.6,
-#           "newsapi": 0.3,
-#           "alpaca":  0.4
-#       },
-#       "news": [               # últimas 5 noticias
-#           {"title": "...", "source": "finnhub", "url": "...", "ts": "..."},
-#       ],
-#       "updated": "14:32:00"
-#   }
-# }
 sentiment_cache = {}
 sentiment_lock  = threading.Lock()
-
 SENTIMENT_UPDATE_INTERVAL = 900  # 15 minutos
-
-
-# ---- Helpers de sentiment ----
 
 def _label(score):
     if score >= 0.15:  return "bullish"
@@ -85,20 +64,13 @@ def _label(score):
     return "neutral"
 
 def _finnhub_sentiment(sym):
-    """
-    Finnhub Company News Sentiment.
-    Devuelve score entre -1 y +1, y lista de noticias recientes.
-    """
     try:
-        # Sentiment score agregado
         url_sent = f"https://finnhub.io/api/v1/news-sentiment?symbol={sym}&token={FINNHUB_API_KEY}"
         r = requests.get(url_sent, timeout=8)
         data = r.json()
-        # companyNewsScore va de 0 a 1 donde >0.5 es positivo
         raw = data.get("companyNewsScore", None)
-        score = round((raw - 0.5) * 2, 3) if raw is not None else None  # normalizar a -1..+1
+        score = round((raw - 0.5) * 2, 3) if raw is not None else None
 
-        # Noticias recientes (últimas 24hs)
         today = datetime.utcnow().strftime("%Y-%m-%d")
         yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
         url_news = (f"https://finnhub.io/api/v1/company-news"
@@ -119,10 +91,6 @@ def _finnhub_sentiment(sym):
         return None, []
 
 def _newsapi_sentiment(sym):
-    """
-    NewsAPI: busca noticias del ticker, hace análisis básico de keywords.
-    Devuelve score estimado entre -1 y +1 y lista de noticias.
-    """
     POSITIVE_WORDS = ["surge", "soar", "beat", "bullish", "gains", "record", "strong",
                       "growth", "upgrade", "buy", "profit", "rally", "outperform",
                       "rises", "higher", "positive", "boom", "jumps"]
@@ -130,7 +98,6 @@ def _newsapi_sentiment(sym):
                       "downgrade", "sell", "loss", "crash", "underperform",
                       "lower", "negative", "warn", "cut", "risk", "plunge"]
     try:
-        # Mapear tickers a nombres de empresa para mejor búsqueda
         COMPANY_NAMES = {
             "NVDA": "NVIDIA", "MSFT": "Microsoft", "META": "Meta",
             "GOOGL": "Google", "AMZN": "Amazon", "PLTR": "Palantir",
@@ -172,10 +139,6 @@ def _newsapi_sentiment(sym):
         return None, []
 
 def _alpaca_news_sentiment(sym):
-    """
-    Alpaca News API: noticias del ticker de las últimas 24hs.
-    Análisis básico por keywords.
-    """
     POSITIVE_WORDS = ["surge", "soar", "beat", "bullish", "gains", "record", "strong",
                       "growth", "upgrade", "buy", "profit", "rally", "outperform",
                       "rises", "higher", "positive", "boom", "jumps"]
@@ -224,11 +187,6 @@ def _alpaca_news_sentiment(sym):
         return None, []
 
 def _combined_sentiment(sym):
-    """
-    Combina las tres fuentes con pesos:
-    Finnhub (50%) > Alpaca News (30%) > NewsAPI (20%)
-    Devuelve dict con score, label, sources, news.
-    """
     fh_score, fh_news = _finnhub_sentiment(sym)
     na_score, na_news = _newsapi_sentiment(sym)
     al_score, al_news = _alpaca_news_sentiment(sym)
@@ -249,7 +207,6 @@ def _combined_sentiment(sym):
 
     combined = round(weighted_sum / weight_total, 3) if weight_total > 0 else 0.0
 
-    # Deduplicar noticias por título
     seen = set()
     all_news = []
     for n in (fh_news + al_news + na_news):
@@ -273,39 +230,27 @@ def _combined_sentiment(sym):
     }
 
 def update_sentiment_cache():
-    """
-    Actualiza el sentiment de todos los tickers.
-    Se llama desde el thread de sentiment cada 15 min.
-    """
     print("📰 Actualizando sentiment cache...")
-    # Solo acciones (crypto no tiene cobertura de noticias suficiente)
     for sym in STOCK_SYMBOLS:
         try:
             result = _combined_sentiment(sym)
             with sentiment_lock:
                 sentiment_cache[sym] = result
             print(f"  {sym}: {result['label']} ({result['score']:+.2f})")
-            time.sleep(1.2)  # Respetar rate limits de Finnhub (60 req/min)
+            time.sleep(1.2)
         except Exception as e:
             print(f"  Error sentiment {sym}: {e}")
     print("✅ Sentiment cache actualizado")
 
 def get_sentiment_bonus(sym):
-    """
-    Devuelve el ajuste de señal basado en sentiment.
-    Rango: -0.3 a +0.3
-    """
     with sentiment_lock:
         s = sentiment_cache.get(sym)
     if not s:
         return 0.0
-    # score va de -1 a +1, mapeamos a -0.3 / +0.3
     return round(s["score"] * 0.3, 4)
 
 def sentiment_loop():
-    """Thread que actualiza el sentiment cada 15 minutos."""
     print("📰 Sentiment loop iniciado")
-    # Primera actualización al arrancar (con delay de 10s para no chocar con el boot)
     time.sleep(10)
     while True:
         try:
@@ -327,7 +272,11 @@ def is_market_open():
     return market_open <= now_et < market_close
 
 def get_stock_bar_prices():
-    prices = {}
+    """
+    Obtiene el cierre y volumen de la última vela de 5min para cada acción.
+    Devuelve dict: { sym: {"price": float, "volume": int} }
+    """
+    result = {}
     try:
         end   = datetime.utcnow()
         start = end - timedelta(minutes=15)
@@ -344,12 +293,14 @@ def get_stock_bar_prices():
             for sym in STOCK_SYMBOLS:
                 sym_df = df[df["symbol"] == sym] if "symbol" in df.columns else df
                 if not sym_df.empty:
-                    close = float(sym_df.iloc[-1]["close"])
+                    last_bar = sym_df.iloc[-1]
+                    close  = float(last_bar["close"])
+                    volume = int(last_bar["volume"]) if "volume" in last_bar else 0
                     if close > 0:
-                        prices[sym] = round(close, 2)
+                        result[sym] = {"price": round(close, 2), "volume": volume}
     except Exception as e:
         print(f"Error velas acciones 5min: {e}")
-    return prices
+    return result
 
 def get_crypto_prices():
     prices = {}
@@ -455,7 +406,7 @@ def run_backtest(s, days=200):
                 prev = prices_list[i - 1]
                 curr = prices_list[i]
                 move = round((curr - prev) / prev, 5) if prev else 0
-                s["prices"][sym] = {"price": curr, "move": move, "trend": move}
+                s["prices"][sym] = {"price": curr, "move": move, "trend": move, "volume": 0, "avg_volume": 0}
 
         T = THRESHOLDS[s["config"]["risk"]]
         for sym in BASE_PRICES:
@@ -588,8 +539,9 @@ def default_state():
         "cash": 1000.0, "start_cap": 1000.0,
         "positions": {}, "history": [], "decisions": [], "log": [],
         "scores":    {s: {"score": 50, "trades": 0, "wins": 0, "last": "hold"} for s in BASE_PRICES},
-        "prices":    {s: {"price": p, "move": 0, "trend": 0} for s, p in BASE_PRICES.items()},
-        "price_history": {s: [] for s in BASE_PRICES},
+        "prices":    {s: {"price": p, "move": 0, "trend": 0, "volume": 0, "avg_volume": 0} for s, p in BASE_PRICES.items()},
+        "price_history":  {s: [] for s in BASE_PRICES},
+        "volume_history": {s: [] for s in BASE_PRICES},
         "patterns": [], "memory": [], "wins": 0, "losses": 0, "cycle": 0,
         "running": False, "last_cycle_time": 0,
         "config": {"freq": 300, "sl": 4, "tp": 6, "sz": 20, "risk": "balanced"},
@@ -606,24 +558,34 @@ def load_state():
         conn.close()
         if row:
             data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-            # Migración: agregar price_history si no existe
             if "price_history" not in data:
                 data["price_history"] = {s: [] for s in BASE_PRICES}
-            # Migración: eliminar símbolos viejos (BTC/ETH/etc) y agregar los nuevos (MU/TSM/CEG/GEV)
+            # Migración: agregar volume_history si no existe
+            if "volume_history" not in data:
+                data["volume_history"] = {s: [] for s in BASE_PRICES}
             valid = set(BASE_PRICES.keys())
             data["scores"] = {
                 s: data["scores"].get(s, {"score": 50, "trades": 0, "wins": 0, "last": "hold"})
                 for s in valid
             }
             data["prices"] = {
-                s: data["prices"].get(s, {"price": BASE_PRICES[s], "move": 0, "trend": 0})
+                s: data["prices"].get(s, {"price": BASE_PRICES[s], "move": 0, "trend": 0, "volume": 0, "avg_volume": 0})
                 for s in valid
             }
+            # Migración: agregar volume/avg_volume a precios existentes si faltan
+            for s in valid:
+                if "volume" not in data["prices"][s]:
+                    data["prices"][s]["volume"] = 0
+                if "avg_volume" not in data["prices"][s]:
+                    data["prices"][s]["avg_volume"] = 0
             data["price_history"] = {
                 s: data["price_history"].get(s, [])
                 for s in valid
             }
-            # Limpiar posiciones de símbolos viejos
+            data["volume_history"] = {
+                s: data["volume_history"].get(s, [])
+                for s in valid
+            }
             data["positions"] = {
                 k: v for k, v in data.get("positions", {}).items() if k in valid
             }
@@ -663,14 +625,26 @@ def simulate_prices(s):
         move  = (trend + (random.random() - 0.5) * 2) * vol
         prev  = s["prices"][sym]["price"]
         np_   = round(prev * (1 + move), 2)
-        s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(trend, 5)}
+        s["prices"][sym] = {"price": np_, "move": round(move, 5), "trend": round(trend, 5),
+                            "volume": 0, "avg_volume": 0}
 
 def _append_price_history(s):
-    ph = s.setdefault("price_history", {s2: [] for s2 in BASE_PRICES})
+    ph = s.setdefault("price_history",  {s2: [] for s2 in BASE_PRICES})
+    vh = s.setdefault("volume_history", {s2: [] for s2 in BASE_PRICES})
     for sym in BASE_PRICES:
+        # Precio
         ph.setdefault(sym, []).append(s["prices"][sym]["price"])
         if len(ph[sym]) > 100:
             ph[sym] = ph[sym][-100:]
+        # Volumen (solo si tiene dato real)
+        vol = s["prices"][sym].get("volume", 0)
+        if vol > 0:
+            vh.setdefault(sym, []).append(vol)
+            if len(vh[sym]) > 100:
+                vh[sym] = vh[sym][-100:]
+        # Actualizar avg_volume en prices para fácil acceso
+        if vh.get(sym):
+            s["prices"][sym]["avg_volume"] = int(sum(vh[sym]) / len(vh[sym]))
 
 def update_prices(s):
     mode = s.get("mode", "alpha")
@@ -686,32 +660,39 @@ def update_prices(s):
     for local_sym, new_price in crypto.items():
         prev = s["prices"][local_sym]["price"]
         move = round((new_price - prev) / prev, 5) if prev else 0
-        s["prices"][local_sym] = {"price": new_price, "move": move, "trend": move}
+        s["prices"][local_sym] = {"price": new_price, "move": move, "trend": move,
+                                  "volume": 0, "avg_volume": s["prices"][local_sym].get("avg_volume", 0)}
     if crypto:
         got_real = True
 
     if market_open:
-        stock_prices = get_stock_bar_prices()
-        if stock_prices:
-            for sym, new_price in stock_prices.items():
-                prev = s["prices"][sym]["price"]
-                move = round((new_price - prev) / prev, 5) if prev else 0
-                s["prices"][sym] = {"price": new_price, "move": move, "trend": move}
+        stock_bars = get_stock_bar_prices()
+        if stock_bars:
+            for sym, bar in stock_bars.items():
+                prev  = s["prices"][sym]["price"]
+                price = bar["price"]
+                vol   = bar["volume"]
+                move  = round((price - prev) / prev, 5) if prev else 0
+                s["prices"][sym] = {"price": price, "move": move, "trend": move,
+                                    "volume": vol, "avg_volume": s["prices"][sym].get("avg_volume", 0)}
+            # Símbolos sin vela: simular movimiento mínimo
             for sym in STOCK_SYMBOLS:
-                if sym not in stock_prices:
-                    vol  = VOLATILITY[sym]
-                    prev = s["prices"][sym]["price"]
-                    move = (random.random() - 0.5) * 2 * vol
+                if sym not in stock_bars:
+                    vol_  = VOLATILITY[sym]
+                    prev  = s["prices"][sym]["price"]
+                    move  = (random.random() - 0.5) * 2 * vol_
                     s["prices"][sym] = {"price": round(prev * (1 + move), 2),
-                                        "move": round(move, 5), "trend": round(move, 5)}
+                                        "move": round(move, 5), "trend": round(move, 5),
+                                        "volume": 0, "avg_volume": s["prices"][sym].get("avg_volume", 0)}
             got_real = True
         else:
             for sym in STOCK_SYMBOLS:
-                vol  = VOLATILITY[sym]
-                prev = s["prices"][sym]["price"]
-                move = (random.random() - 0.5) * 2 * vol
+                vol_  = VOLATILITY[sym]
+                prev  = s["prices"][sym]["price"]
+                move  = (random.random() - 0.5) * 2 * vol_
                 s["prices"][sym] = {"price": round(prev * (1 + move), 2),
-                                    "move": round(move, 5), "trend": round(move, 5)}
+                                    "move": round(move, 5), "trend": round(move, 5),
+                                    "volume": 0, "avg_volume": s["prices"][sym].get("avg_volume", 0)}
         _append_price_history(s)
 
     return got_real, market_open
@@ -757,16 +738,94 @@ def check_sl_tp(s):
         log(s, f"{reason.upper()} {sym} · ret {round(ret*100,2)}% · P&L ${pnl}", "buy" if pnl>0 else "sell")
         pos["qty"] = 0
 
+# -------------------------------------------------------
+# RSI — cálculo puro sin dependencias externas
+# -------------------------------------------------------
+def calc_rsi(prices, period=14):
+    """
+    Calcula el RSI sobre una lista de precios de cierre.
+    Retorna valor entre 0 y 100, o None si no hay suficientes datos.
+    RSI < 30 → sobrevendido (señal de compra)
+    RSI > 70 → sobrecomprado (señal de venta)
+    """
+    if len(prices) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, period + 1):
+        delta = prices[-period - 1 + i] - prices[-period - 2 + i]
+        if delta >= 0:
+            gains.append(delta)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(delta))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+# -------------------------------------------------------
+# Factor de volumen
+# -------------------------------------------------------
+def calc_volume_factor(sym, s):
+    """
+    Compara el volumen actual con el promedio histórico.
+    Retorna un multiplicador entre 0.7 y 1.5:
+      - Volumen 2x el promedio  → factor 1.5  (señal más fuerte)
+      - Volumen igual al promedio → factor 1.0 (neutro)
+      - Volumen < 50% del promedio → factor 0.7 (señal más débil)
+    Si no hay datos de volumen, devuelve 1.0 (sin efecto).
+    """
+    current_vol = s["prices"][sym].get("volume", 0)
+    avg_vol     = s["prices"][sym].get("avg_volume", 0)
+    if current_vol <= 0 or avg_vol <= 0:
+        return 1.0
+    ratio = current_vol / avg_vol
+    # Clampear entre 0.7 y 1.5
+    factor = max(0.7, min(1.5, 0.7 + ratio * 0.3))
+    return round(factor, 3)
+
+# -------------------------------------------------------
+# RSI adjustment: cuánto suma/resta a la señal
+# -------------------------------------------------------
+def calc_rsi_adjustment(rsi):
+    """
+    Convierte el RSI en un ajuste aditivo para la señal:
+      RSI < 30 (sobrevendido)  → hasta +0.4 (favorece compra)
+      RSI > 70 (sobrecomprado) → hasta -0.4 (favorece venta)
+      RSI entre 30-70          → ajuste proporcional pequeño
+    """
+    if rsi is None:
+        return 0.0
+    if rsi < 30:
+        # Más sobrevendido → más bonus de compra
+        return round((30 - rsi) / 30 * 0.4, 3)
+    elif rsi > 70:
+        # Más sobrecomprado → más penalización
+        return round(-((rsi - 70) / 30 * 0.4), 3)
+    else:
+        # Zona neutral: ajuste leve centrado en 50
+        return round((50 - rsi) / 50 * 0.1, 3)
+
 def calc_signal(s, sym, mult):
     """
-    Señal combinada: MA5/MA20 + ajuste de sentiment.
-    El sentiment aporta hasta ±0.3 sobre la señal base.
+    Señal combinada: MA5/MA20 + RSI + Volumen + Sentiment.
+
+    Componentes:
+      - Base MA:      cruce MA5/MA20 normalizado por volatilidad  (principal)
+      - RSI adjust:   hasta ±0.4 según zona sobrecompra/sobreventa
+      - Vol factor:   multiplica la señal base entre 0.7x y 1.5x
+      - Sent bonus:   hasta ±0.3 según noticias
     """
     hist  = s.get("price_history", {}).get(sym, [])
     move  = s["prices"][sym]["move"]
     vol   = VOLATILITY[sym]
     sc    = s["scores"][sym]["score"]
 
+    # --- Señal base MA ---
     if len(hist) < 20:
         sig_base = round((move / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
     else:
@@ -775,9 +834,22 @@ def calc_signal(s, sym, mult):
         cross    = (ma5 - ma20) / ma20
         sig_base = round((cross / vol) * mult + ((sc - 50) / 50) * 0.4, 3)
 
-    # Bonus de sentiment (-0.3 a +0.3)
+    # --- Factor de volumen (multiplica la señal base) ---
+    vol_factor = calc_volume_factor(sym, s)
+    sig_base   = round(sig_base * vol_factor, 3)
+
+    # --- RSI ---
+    rsi        = calc_rsi(hist) if len(hist) >= 15 else None
+    rsi_adjust = calc_rsi_adjustment(rsi)
+
+    # --- Sentiment ---
     sent_bonus = get_sentiment_bonus(sym)
-    return round(sig_base + sent_bonus, 3)
+
+    # Guardar indicadores en scores para el dashboard
+    s["scores"][sym]["rsi"]        = rsi
+    s["scores"][sym]["vol_factor"] = vol_factor
+
+    return round(sig_base + rsi_adjust + sent_bonus, 3)
 
 def run_cycle(s):
     now  = time.time()
@@ -802,7 +874,9 @@ def run_cycle(s):
     hist_len = len(s.get("price_history", {}).get("NVDA", []))
     source  += " · MA5/MA20 activa" if hist_len >= 20 else f" · acumulando historial ({hist_len}/20)"
 
-    # Indicar si sentiment está activo
+    rsi_sample = s["scores"].get("NVDA", {}).get("rsi")
+    source += f" · RSI:{rsi_sample}" if rsi_sample is not None else " · RSI:acumulando"
+
     sent_ready = len(sentiment_cache) > 0
     source += " · 📰 Sentiment activo" if sent_ready else " · ⏳ Sentiment cargando"
 
@@ -825,7 +899,6 @@ def run_cycle(s):
         price   = gp(s, sym)
         s["scores"][sym]["last"] = "compra" if sig>=T["buy"] else "venta" if sig<=T["sell"] else "hold"
 
-        # Guardar sentiment label en el score para mostrarlo en dashboard
         with sentiment_lock:
             sent = sentiment_cache.get(sym)
         s["scores"][sym]["sentiment"] = sent["label"] if sent else "neutral"
@@ -842,8 +915,8 @@ def run_cycle(s):
                 s["positions"][sym] = {"qty": qty, "avg_cost": price}
                 s["history"].insert(0,  {"t": ts(), "sym": sym, "type": "Compra", "qty": qty, "price": price, "pnl": None})
                 s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "COMPRA", "price": price,
-                                           "detail": f"señal {sig} · sent {s['scores'][sym]['sentiment']}"})
-                log(s, f"COMPRA {qty} {sym} a ${price} · sent:{s['scores'][sym]['sentiment']}", "buy")
+                                           "detail": f"señal {sig} · RSI:{s['scores'][sym].get('rsi','?')} · vol:{s['scores'][sym].get('vol_factor','?')}x · sent:{s['scores'][sym]['sentiment']}"})
+                log(s, f"COMPRA {qty} {sym} a ${price} · RSI:{s['scores'][sym].get('rsi','?')} · vol:{s['scores'][sym].get('vol_factor','?')}x · sent:{s['scores'][sym]['sentiment']}", "buy")
                 bought += 1
 
         elif sig <= T["sell"] and has_pos:
@@ -855,9 +928,9 @@ def run_cycle(s):
             update_brain(s, sym, pnl>0, (price-pos["avg_cost"])/pos["avg_cost"])
             s["history"].insert(0,  {"t": ts(), "sym": sym, "type": "Venta", "qty": pos["qty"], "price": price, "pnl": pnl})
             s["decisions"].insert(0, {"t": ts(), "sym": sym, "action": "VENTA", "price": price,
-                                       "detail": f"señal {sig} · P&L ${pnl} · sent {s['scores'][sym]['sentiment']}",
+                                       "detail": f"señal {sig} · P&L ${pnl} · RSI:{s['scores'][sym].get('rsi','?')} · sent:{s['scores'][sym]['sentiment']}",
                                        "won": pnl>0})
-            log(s, f"VENTA {pos['qty']} {sym} a ${price} · P&L ${pnl} · sent:{s['scores'][sym]['sentiment']}",
+            log(s, f"VENTA {pos['qty']} {sym} a ${price} · P&L ${pnl} · RSI:{s['scores'][sym].get('rsi','?')} · sent:{s['scores'][sym]['sentiment']}",
                 "buy" if pnl>0 else "sell")
             pos["qty"] = 0
             sold += 1
@@ -904,7 +977,6 @@ def background_loop():
 bg_thread = threading.Thread(target=background_loop, daemon=True)
 bg_thread.start()
 
-# Lanzar sentiment loop en background
 sent_thread = threading.Thread(target=sentiment_loop, daemon=True)
 sent_thread.start()
 
@@ -931,6 +1003,7 @@ def get_state():
     pnl   = round(total - state["start_cap"], 2)
     wr    = round(state["wins"]/(state["wins"]+state["losses"])*100) if (state["wins"]+state["losses"])>0 else 0
     hist_len = len(state.get("price_history", {}).get("NVDA", []))
+    rsi_ready = hist_len >= 15
     return jsonify({
         "running": state["running"], "cycle": state["cycle"],
         "cash":    round(state["cash"],2), "total": round(total,2),
@@ -943,7 +1016,8 @@ def get_state():
         "history_count": len(state["history"]),
         "mode":    state.get("mode", "alpha"),
         "alpaca_connected": trading_client is not None,
-        "ma_ready":   hist_len >= 20,
+        "ma_ready":    hist_len >= 20,
+        "rsi_ready":   rsi_ready,
         "ma_progress": f"{hist_len}/20",
         "market_open": is_market_open() if state.get("mode") == "beta" else None,
         "sentiment_ready": len(sentiment_cache) > 0
@@ -951,14 +1025,12 @@ def get_state():
 
 @app.route("/sentiment")
 def get_sentiment():
-    """Devuelve el sentiment cache completo para el dashboard."""
     with sentiment_lock:
         data = dict(sentiment_cache)
     return jsonify({"sentiment": data, "symbols": len(data)})
 
 @app.route("/sentiment/refresh", methods=["POST"])
 def refresh_sentiment():
-    """Fuerza una actualización inmediata del sentiment."""
     def _refresh():
         update_sentiment_cache()
     t = threading.Thread(target=_refresh, daemon=True)
